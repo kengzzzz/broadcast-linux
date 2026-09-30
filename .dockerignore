@@ -1,0 +1,14 @@
+target/
+build/
+notes/
+HANDOFF.md
+vendor/
+afx-api/
+afx-sdk-samples/
+vfx-sdk-samples/
+dist/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.wav

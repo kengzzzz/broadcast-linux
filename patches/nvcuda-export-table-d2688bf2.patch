@@ -1,0 +1,77 @@
+diff --git a/dlls/nvcuda/internal.c b/dlls/nvcuda/internal.c
+index e6cc6cc..c8b17f2 100644
+--- a/dlls/nvcuda/internal.c
++++ b/dlls/nvcuda/internal.c
+@@ -193,6 +193,9 @@ static const CUuuid UUID_Relay13                    = {{0xDD, 0x9E, 0x98, 0xA4,
+ static const CUuuid UUID_Relay14                    = {{0xDA, 0x91, 0x51, 0xD3, 0x3A, 0xE6, 0xCC, 0x41,
+                                                         0xA5, 0xC0, 0x4F, 0x26, 0xD5, 0x33, 0xE3, 0x28}};
+                                                     // {da9151d3-3ae6-cc41-a5c0-4f26d533e328}
++static const CUuuid UUID_Relay15                    = {{0xD2, 0x68, 0x8B, 0xF2, 0x83, 0x71, 0xE2, 0x4F,
++                                                        0x94, 0x69, 0x81, 0x77, 0xC8, 0xCC, 0xEC, 0x27}};
++                                                    // {d2688bf2-8371-e24f-9469-8177c8ccec27}
+ 
+ struct cuda_table
+ {
+@@ -1011,6 +1014,20 @@ static const struct
+     void* (*func5)(void *param0, void *param1);
+ } *Relay14_orig = NULL;
+ 
++/*
++ * Relay15
++ */
++struct Relay15_table
++{
++    int size;
++    void* (WINAPI* func0)(void *param0, void *param1, void *param2, void *param3, void *param4, void *param5, void *param6, void *param7);
++};
++static const struct
++{
++    int size;
++    void* (*func0)(void *param0, void *param1, void *param2, void *param3, void *param4, void *param5, void *param6, void *param7);
++} *Relay15_orig = NULL;
++
+ static void* WINAPI Relay1_func0(void *param0, void *param1)
+ {
+     TRACE("(%p, %p)\n", param0, param1);
+@@ -3530,6 +3547,22 @@ static struct Relay14_table Relay14_Impl =
+     Relay14_func5,
+ };
+ 
++/* signature unknown; forward eight pointer-sized arguments so both ABIs see the same integer args */
++static void* WINAPI Relay15_func0(void *param0, void *param1, void *param2, void *param3, void *param4, void *param5, void *param6, void *param7)
++{
++    void *ret;
++    TRACE("(%p, %p, %p, %p, %p, %p, %p, %p)\n", param0, param1, param2, param3, param4, param5, param6, param7);
++    ret = Relay15_orig->func0(param0, param1, param2, param3, param4, param5, param6, param7);
++    TRACE("ret %p\n", ret);
++    return ret;
++}
++
++static struct Relay15_table Relay15_Impl =
++{
++    sizeof(struct Relay15_table),
++    Relay15_func0,
++};
++
+ static BOOL cuda_check_table(const struct cuda_table *orig, struct cuda_table *impl, const char *name)
+ {
+     if (!orig)
+@@ -3742,6 +3775,18 @@ CUresult cuda_get_table(const void **table, const CUuuid *uuid, const void *orig
+         *table = (void *)&Relay14_Impl;
+         return CUDA_SUCCESS;
+     }
++    else if (cuda_equal_uuid(uuid, &UUID_Relay15))
++    {
++        TRACE("(%p, Relay15_UUID: %s)\n", table, cuda_print_uuid(uuid, buffer, sizeof(buffer)));
++        if (orig_result)
++            return orig_result;
++        if (!cuda_check_table(orig_table, (void *)&Relay15_Impl, "Relay15"))
++            return CUDA_ERROR_UNKNOWN;
++
++        Relay15_orig = orig_table;
++        *table = (void *)&Relay15_Impl;
++        return CUDA_SUCCESS;
++    }
+ 
+     FIXME("Unknown UUID: %s, error: %d\n", cuda_print_uuid(uuid, buffer, sizeof(buffer)), orig_result);
+     return CUDA_ERROR_UNKNOWN;

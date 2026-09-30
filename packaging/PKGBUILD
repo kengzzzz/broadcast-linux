@@ -1,0 +1,53 @@
+# Maintainer: kengzzzz
+
+pkgname=broadcast-linux
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="NVIDIA Broadcast's effects (noise and echo removal, background replacement, Studio Light) as a virtual mic and camera, using NVIDIA's own runtime under Wine"
+arch=(x86_64)
+url="https://github.com/kengzzzz/broadcast-linux"
+license=(MIT LGPL-2.1-or-later)
+depends=(gcc-libs glibc libpipewire pipewire wireplumber libpulse wine ffmpeg nvidia-utils)
+makedepends=(cargo clang git meson ninja)
+optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)')
+options=(!lto !debug)
+install=broadcast-linux.install
+source=("git+$url.git#tag=v$pkgver"
+        "git+https://github.com/SveSop/nvcuda.git"
+        "git+https://github.com/NVIDIA-Maxine/Maxine-VFX-SDK.git")
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+    cd "$pkgname"
+    git submodule init
+    git config submodule.wine-nvcuda.url "$srcdir/nvcuda"
+    git config submodule.vfx-api.url "$srcdir/Maxine-VFX-SDK"
+    git -c protocol.file.allow=always submodule update
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    CARGO_ARGS=--frozen ./build.sh "$srcdir/stage"
+}
+
+check() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --release
+}
+
+package() {
+    cd "$pkgname"
+    cp -a "$srcdir/stage/." "$pkgdir/usr/"
+    install -Dm644 packaging/broadcast-linux.service "$pkgdir/usr/lib/systemd/user/broadcast-linux.service"
+    install -Dm644 packaging/modules-load.conf "$pkgdir/usr/lib/modules-load.d/broadcast-linux.conf"
+    install -Dm644 packaging/modprobe.conf "$pkgdir/usr/lib/modprobe.d/broadcast-linux.conf"
+    install -Dm644 packaging/config.toml "$pkgdir/usr/share/doc/$pkgname/config.toml"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 wine-nvcuda/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvcuda.md"
+    install -Dm644 vfx-api/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvidia-vfx-headers"
+}

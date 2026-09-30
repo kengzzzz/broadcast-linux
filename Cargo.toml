@@ -1,0 +1,32 @@
+[package]
+name = "broadcast-linux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+flate2 = "1.1.10"
+hex = "0.4.3"
+libc = "0.2.189"
+pipewire = { version = "0.10.1", features = ["v0_3_49"] }
+ringbuf = "0.5.2"
+serde = { version = "1.0.229", features = ["derive"] }
+sevenz-rust2 = "0.23.0"
+sha2 = "0.11.0"
+tar = "0.4.46"
+toml = "1.1.6"
+ureq = "3.4.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0

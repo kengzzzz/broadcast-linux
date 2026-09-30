@@ -1,0 +1,23 @@
+# NVIDIA binaries and models: licensed for personal use only, never redistribute
+/vendor/
+
+# Wine prefix, downloads, recordings, webcam/audio test output
+/build/
+
+# Personal media (the background image is copyrighted)
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.wav
+
+# Upstream reference clones, not needed to build
+/afx-api/
+/afx-sdk-samples/
+/vfx-sdk-samples/
+
+# Rust
+/target/
+
+# Release tarballs from docker build --output
+/dist/

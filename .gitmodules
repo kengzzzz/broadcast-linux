@@ -1,0 +1,6 @@
+[submodule "wine-nvcuda"]
+	path = wine-nvcuda
+	url = https://github.com/SveSop/nvcuda.git
+[submodule "vfx-api"]
+	path = vfx-api
+	url = https://github.com/NVIDIA-Maxine/Maxine-VFX-SDK.git
