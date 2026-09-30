@@ -38,7 +38,7 @@ ffmpeg -nostdin -hide_banner -loglevel error -stream_loop -1 -re -i "$sample" -f
 player=$!
 
 mkdir -p "$work/config/broadcast-linux"
-printf '[mic]\ninput = "bltest_src"\n%s\n\n[camera]\nenabled = false\n' "${MIC_EFFECTS:-}" > "$work/config/broadcast-linux/config.toml"
+printf '[mic]\ninput = "bltest_src"\nunload_after_minutes = 0\n%s\n\n[camera]\nenabled = false\n' "${MIC_EFFECTS:-}" > "$work/config/broadcast-linux/config.toml"
 XDG_CONFIG_HOME="$work/config" \
     "$bin" run > "$work/service.log" 2>&1 &
 service=$!

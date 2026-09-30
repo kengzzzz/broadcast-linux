@@ -3,7 +3,7 @@
 # Built on Debian 13 (the binaries need glibc 2.39+); WineHQ's stable Wine 11 is what the
 # nvcuda relay and the workers are built against.
 FROM debian:13 AS build
-ARG RUST_VERSION=1.97.1
+ARG RUST_VERSION=1.98.1
 ARG WINE_VERSION=11.0.0.0~trixie-1
 RUN dpkg --add-architecture i386 \
  && apt-get update \

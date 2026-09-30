@@ -395,8 +395,10 @@ impl Mic {
                 if let Some(bytes) = data.data() {
                     let end = (offset + size).min(bytes.len());
                     let samples = bytes[offset..end]
-                        .chunks_exact(4)
-                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b));
                     ring.push_iter(samples);
                 }
             })
@@ -479,8 +481,13 @@ fn fill_output(stream: &pw::stream::Stream, ring: &mut Option<Cons>) {
                 TRIMMED_SAMPLES.fetch_add(excess as u64, Ordering::Relaxed);
                 ring.skip(excess);
             }
-            for (slot, sample) in bytes[..n * 4].chunks_exact_mut(4).zip(ring.pop_iter()) {
-                slot.copy_from_slice(&sample.to_le_bytes());
+            for (slot, sample) in bytes[..n * 4]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(ring.pop_iter())
+            {
+                *slot = sample.to_le_bytes();
                 filled += 1;
             }
         }
@@ -559,8 +566,8 @@ fn feed_worker(
             DROPPED_FRAMES.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        for (b, s) in bytes.chunks_exact_mut(4).zip(&samples) {
-            b.copy_from_slice(&s.to_le_bytes());
+        for (b, s) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(&samples) {
+            *b = s.to_le_bytes();
         }
         if stdin
             .write_all(&bytes)
@@ -598,8 +605,10 @@ fn drain_worker(
         carry.extend_from_slice(&buf[..n]);
         let whole = carry.len() / 4 * 4;
         let samples = carry[..whole]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b));
         frame_samples += samples.len();
         ring.push_iter(samples);
         carry.drain(..whole);

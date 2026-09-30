@@ -127,7 +127,12 @@ impl Loopback {
 /// Converts packed BGR24 to YUYV (BT.601, limited range), two pixels at a time.
 #[allow(clippy::many_single_char_names)]
 pub fn bgr_to_yuyv(bgr: &[u8], yuyv: &mut [u8]) {
-    for (src, dst) in bgr.chunks_exact(6).zip(yuyv.chunks_exact_mut(4)) {
+    for (src, dst) in bgr
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .zip(yuyv.as_chunks_mut::<4>().0)
+    {
         let px = |i: usize| {
             (
                 i32::from(src[i + 2]),
@@ -142,12 +147,12 @@ pub fn bgr_to_yuyv(bgr: &[u8], yuyv: &mut [u8]) {
         let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
         let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
         let clamp = |x: i32| u8::try_from(x.clamp(0, 255)).unwrap_or(0);
-        dst.copy_from_slice(&[
+        *dst = [
             clamp(y(r0, g0, b0)),
             clamp(u),
             clamp(y(r1, g1, b1)),
             clamp(v),
-        ]);
+        ];
     }
 }
 
