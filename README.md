@@ -66,8 +66,9 @@ git submodule update --init
 docker build --output type=local,dest=dist .   # release tarball
 ```
 
-Local build: Rust, Wine 11 (`winegcc` and headers), PipeWire headers, clang,
-pkg-config, meson, ninja.
+Local build: Rust via rustup, Wine 11 (`winegcc` and headers), PipeWire headers,
+clang, pkg-config, meson, ninja. `rust-toolchain.toml` pins Rust for local builds,
+CI checks and Docker releases.
 
 CI checks code pushes to `main` and pull requests; Markdown/licence-only changes
 skip checks. `v*` tags publish one tarball after checks pass. Keep `Cargo.toml`,

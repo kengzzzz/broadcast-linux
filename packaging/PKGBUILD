@@ -1,7 +1,7 @@
 # Maintainer: kengzzzz
 
 pkgname=broadcast-linux
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
@@ -23,19 +23,16 @@ prepare() {
     git config submodule.wine-nvcuda.url "$srcdir/nvcuda"
     git config submodule.vfx-api.url "$srcdir/Maxine-VFX-SDK"
     git -c protocol.file.allow=always submodule update
-    export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd "$pkgname"
-    export RUSTUP_TOOLCHAIN=stable
     CARGO_ARGS=--frozen ./build.sh "$srcdir/stage"
 }
 
 check() {
     cd "$pkgname"
-    export RUSTUP_TOOLCHAIN=stable
     cargo test --frozen --release
 }
 

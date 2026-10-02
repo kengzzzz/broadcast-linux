@@ -335,7 +335,7 @@ mod tests {
             stages("[mic]\nnoise_removal = { enabled = false }\nroom_echo_removal = {}"),
             [(Dereverb, 1.0)]
         );
-        assert!(stages("[mic]\nnoise_removal = { enabled = false }").is_empty());
+        assert_eq!(stages("[mic]\nnoise_removal = { enabled = false }"), []);
     }
 
     #[test]

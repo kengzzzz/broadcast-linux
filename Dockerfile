@@ -3,7 +3,6 @@
 # Built on Debian 13 (the binaries need glibc 2.39+); WineHQ's stable Wine 11 is what the
 # nvcuda relay and the workers are built against.
 FROM debian:13 AS build
-ARG RUST_VERSION=1.98.1
 ARG WINE_VERSION=11.0.0.0~trixie-1
 RUN dpkg --add-architecture i386 \
  && apt-get update \
@@ -19,8 +18,10 @@ RUN dpkg --add-architecture i386 \
       libpipewire-0.3-dev libspa-0.2-dev meson ninja-build git patch \
  && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:/opt/wine-stable/bin:$PATH
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
 WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none \
+ && rustc --version
 COPY . .
 RUN CARGO_ARGS=--locked ci/release-tarball.sh /dist
 

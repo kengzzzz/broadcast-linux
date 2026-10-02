@@ -12,6 +12,7 @@ out=$(realpath -m -- "${1:-$root/build/stage}")
 lib="$out/lib/broadcast-linux"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+cd "$root"
 
 for sub in wine-nvcuda vfx-api; do
     if [[ -z $(ls -A "$root/$sub" 2>/dev/null) ]]; then
