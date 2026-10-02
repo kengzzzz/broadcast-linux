@@ -315,6 +315,15 @@ impl CameraLoop {
             let cache = prepare_background(&self.paths, background, self.width, self.height)?;
             args.extend(["--background".into(), cache.display().to_string()]);
         }
+        if self.config.background_blur.enabled {
+            args.extend([
+                "--blur".into(),
+                self.config.background_blur.strength.to_string(),
+            ]);
+        }
+        if self.config.background_removal.enabled {
+            args.push("--remove-background".into());
+        }
         let light = self.config.studio_light;
         if light.enabled {
             let models = install.model_dir("nvbcast_vfx_rl_v0_9")?;
@@ -397,6 +406,12 @@ fn effects_name(config: &CameraConfig) -> String {
     }
     if config.background.is_some() {
         names.push("background replacement");
+    }
+    if config.background_blur.enabled {
+        names.push("background blur");
+    }
+    if config.background_removal.enabled {
+        names.push("background removal");
     }
     if config.studio_light.enabled {
         names.push("Studio Light");

@@ -1,13 +1,13 @@
 # Maintainer: kengzzzz
 
 pkgname=broadcast-linux
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="NVIDIA Broadcast's effects (noise and echo removal, background replacement, Studio Light) as a virtual mic and camera, using NVIDIA's own runtime under Wine"
+pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
 url="https://github.com/kengzzzz/broadcast-linux"
 license=(MIT LGPL-2.1-or-later)
-depends=(gcc-libs glibc libpipewire pipewire wireplumber libpulse wine ffmpeg nvidia-utils)
+depends=(gcc-libs glibc libpipewire pipewire wireplumber libpulse 'wine>=11' ffmpeg nvidia-utils)
 makedepends=(cargo clang git meson ninja)
 optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)')
 options=(!lto !debug)

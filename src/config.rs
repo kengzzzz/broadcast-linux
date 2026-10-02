@@ -166,6 +166,22 @@ impl Default for StudioLight {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BackgroundBlur {
+    pub enabled: bool,
+    pub strength: f32,
+}
+
+impl Default for BackgroundBlur {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strength: 0.5,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {
@@ -178,12 +194,33 @@ pub struct CameraConfig {
     /// Broadcast ships only the strong denoising model, so there is no strength.
     pub video_noise_removal: Toggle,
     pub background: Option<String>,
+    pub background_blur: BackgroundBlur,
+    pub background_removal: Toggle,
     pub studio_light: StudioLight,
 }
 
 impl CameraConfig {
     pub fn has_effects(&self) -> bool {
-        self.video_noise_removal.enabled || self.background.is_some() || self.studio_light.enabled
+        self.video_noise_removal.enabled
+            || self.background.is_some()
+            || self.background_blur.enabled
+            || self.background_removal.enabled
+            || self.studio_light.enabled
+    }
+
+    fn validate(&self) -> Result<()> {
+        let backgrounds = usize::from(self.background.is_some())
+            + usize::from(self.background_blur.enabled)
+            + usize::from(self.background_removal.enabled);
+        anyhow::ensure!(
+            backgrounds <= 1,
+            "use only one camera background effect: background, background_blur or background_removal"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.background_blur.strength),
+            "camera.background_blur.strength must be between 0.0 and 1.0"
+        );
+        Ok(())
     }
 }
 
@@ -198,6 +235,11 @@ impl Default for CameraConfig {
             fps: 30,
             video_noise_removal: Toggle { enabled: false },
             background: None,
+            background_blur: BackgroundBlur {
+                enabled: false,
+                ..BackgroundBlur::default()
+            },
+            background_removal: Toggle { enabled: false },
             studio_light: StudioLight {
                 enabled: false,
                 ..StudioLight::default()
@@ -234,7 +276,13 @@ impl Config {
             return Ok(Self::default());
         }
         let text = fs::read_to_string(path)?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let config: Self =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config
+            .camera
+            .validate()
+            .with_context(|| format!("validating {}", path.display()))?;
+        Ok(config)
     }
 }
 
@@ -306,6 +354,43 @@ mod tests {
     #[test]
     fn studio_voice_has_no_strength() {
         assert!(toml::from_str::<Config>("[mic]\nstudio_voice = { strength = 0.5 }").is_err());
+    }
+
+    #[test]
+    fn camera_background_effects() {
+        let config: Config = toml::from_str("[camera]\nbackground_blur = {}").unwrap();
+        assert!(config.camera.background_blur.enabled);
+        assert!((config.camera.background_blur.strength - 0.5).abs() < f32::EPSILON);
+        for effect in [
+            "background = \"~/Pictures/background.jpg\"",
+            "background_blur = { enabled = true, strength = 0.75 }",
+            "background_removal = { enabled = true }",
+        ] {
+            let config: Config = toml::from_str(&format!("[camera]\n{effect}")).unwrap();
+            assert!(config.camera.has_effects());
+            config.camera.validate().unwrap();
+        }
+        for settings in [
+            "background = \"image.jpg\"\nbackground_blur = {}",
+            "background = \"image.jpg\"\nbackground_removal = {}",
+            "background_blur = {}\nbackground_removal = {}",
+            "background_blur = { strength = -0.1 }",
+            "background_blur = { strength = 1.1 }",
+            "background_blur = { strength = nan }",
+        ] {
+            let config: Config = toml::from_str(&format!("[camera]\n{settings}")).unwrap();
+            assert!(config.camera.validate().is_err(), "{settings}");
+        }
+        assert!(
+            toml::from_str::<Config>("[camera]\nbackground_removal = { strength = 0.5 }").is_err()
+        );
+    }
+
+    #[test]
+    fn example_config_matches_defaults() {
+        let config: Config = toml::from_str(include_str!("../packaging/config.toml")).unwrap();
+        assert_eq!(config, Config::default());
+        config.camera.validate().unwrap();
     }
 
     #[test]

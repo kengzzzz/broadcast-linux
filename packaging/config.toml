@@ -1,50 +1,47 @@
 # broadcast-linux configuration: ~/.config/broadcast-linux/config.toml
-# Apply changes with: systemctl --user reload broadcast-linux
+# Apply: systemctl --user reload broadcast-linux
+# Restart for mic/camera enabled, mic name, camera device/width/height.
+# All enabled fields: true | false. All strength fields: 0.0..1.0.
+# All mic effects off, or all camera effects off with no background: passthrough.
 
 [mic]
 enabled = true
-# PipeWire node name of your real microphone (see `pactl list short sources`),
-# or "default" for the current default source. To make "NVIDIA Broadcast Mic"
-# the system default input (`pactl set-default-source broadcast_linux_mic`), set
-# the real mic's name here instead of "default".
+# "default" | real mic node name (`pactl list short sources`).
+# Set a real node name before making Broadcast Mic the default input.
 input = "default"
-# strength goes from 0.0 (no effect) to 1.0.
+# Noise removal; strength 0.0 = no effect, 1.0 = full effect.
 noise_removal = { enabled = true, strength = 1.0 }
-# With noise removal also on, NVIDIA's combined model runs both, using the higher
-# of the two strengths.
+# Echo removal; combined with noise removal at the higher strength.
 room_echo_removal = { enabled = false, strength = 1.0 }
-# Regenerates your voice to sound like a studio mic, and replaces noise and echo
-# removal while on (as in the Windows app). No strength setting.
+# Studio mic voice; overrides noise/echo removal. No strength option.
 studio_voice = { enabled = false }
-# With every effect off, the mic is passed through unchanged.
-# Minutes the effect stays loaded after the last app stops using the mic, so
-# reopening it is instant (idle cost: about 1.7 GB of RAM and 300 MiB of GPU
-# memory). After that it unloads; the next use takes about 0.7 s to load, which
-# is silent. 0 unloads right away.
+# Whole minutes to retain the idle mic model after pausing; 0 = unload on pause.
 unload_after_minutes = 10
-# Name shown to apps. Changing it needs a service restart.
+# Device name shown to apps (any string).
 name = "NVIDIA Broadcast Mic"
 
 [camera]
 enabled = true
-# The v4l2loopback device apps read from (created by the v4l2loopback module).
+# v4l2loopback output device path.
 device = "/dev/video10"
-# Your real webcam, captured as MJPEG at this size and rate. Changing the size
-# needs a service restart; everything else applies the next time an app opens it.
+# Real webcam device path; must support MJPEG at the size/rate below.
 input = "/dev/video0"
+# Positive pixel dimensions (width must be even) and frames per second.
 width = 1920
 height = 1080
 fps = 30
-# Removes low-light grain. No strength setting (Broadcast ships one model).
+# Low-light noise removal. No strength option.
 video_noise_removal = { enabled = false }
-# Image to put behind you (scaled to fill the frame); leave out to keep your real
-# background.
+# Image path (supports ~/), scaled to fill; omit to keep the real background.
+# Use only one background effect: image, blur or removal.
 # background = "~/Pictures/background.jpg"
-# Relights your face like a studio key light. preset: cooler, cool, neutral, warm
-# or warmer. strength goes from 0.0 to 1.0.
+# Blur the background; strength: 0.0 = off, 1.0 = full blur.
+background_blur = { enabled = false, strength = 0.5 }
+# Remove the background to black (virtual camera has no transparency).
+background_removal = { enabled = false }
+# Face relighting. preset: "cooler" | "cool" | "neutral" | "warm" | "warmer".
 studio_light = { enabled = false, strength = 1.0, preset = "neutral" }
-# With no background and Studio Light off, the webcam is passed through unchanged.
 
 [service]
-# Seconds to keep an effect running after the last app stops using the device.
+# Whole seconds after last reader: pause mic / stop camera; 0 = immediately.
 idle_timeout_seconds = 5

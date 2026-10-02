@@ -112,22 +112,33 @@ fail:
 static void usage(void) {
     fprintf(stderr,
             "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
-            "           [--background FILE.bgr] [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
+            "           [--background FILE.bgr | --blur 0..1 | --remove-background]\n"
+            "           [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
             "           < input.bgr > output.bgr\n"
-            "Frames and the background are BGR24 at --size. Without --background the person is\n"
-            "composited over their own (unlit) surroundings.\n");
+            "Frames and the background are BGR24 at --size. Removal fills the background black.\n");
 }
 
 int main(int argc, char **argv) {
     const char *gs_dir = NULL, *background_path = NULL, *relight_dir = NULL, *hdr_path = NULL,
                *denoise_dir = NULL;
     float strength = 1, denoise_strength = 1;
+    float blur_strength = 0.5f;
+    int blur_enabled = 0, remove_background = 0;
     unsigned width = 0, height = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *next = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--background") && next) background_path = argv[++i];
-        else if (!strcmp(a, "--relight") && next) relight_dir = argv[++i];
+        else if (!strcmp(a, "--remove-background")) remove_background = 1;
+        else if (!strcmp(a, "--blur") && next) {
+            char *end;
+            blur_strength = strtof(argv[++i], &end);
+            if (end == argv[i] || *end || !isfinite(blur_strength) || blur_strength < 0 || blur_strength > 1) {
+                fprintf(stderr, "Blur strength must be between 0.0 and 1.0\n");
+                return 2;
+            }
+            blur_enabled = 1;
+        } else if (!strcmp(a, "--relight") && next) relight_dir = argv[++i];
         else if (!strcmp(a, "--hdr") && next) hdr_path = argv[++i];
         else if (!strcmp(a, "--strength") && next) strength = (float)atof(argv[++i]);
         else if (!strcmp(a, "--denoise") && next) denoise_dir = argv[++i];
@@ -143,6 +154,12 @@ int main(int argc, char **argv) {
         usage();
         return 2;
     }
+    if (!!background_path + blur_enabled + remove_background > 1) {
+        fprintf(stderr, "Use only one of --background, --blur or --remove-background\n");
+        return 2;
+    }
+    /* NVIDIA's filter still blurs at strength zero; make zero a true passthrough. */
+    if (blur_strength == 0) blur_enabled = 0;
 
     HMODULE vfx = LoadLibraryA("NVVideoEffects.dll");
     HMODULE cv = LoadLibraryA("NVCVImage.dll");
@@ -177,14 +194,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL;
+    NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL, blur = NULL;
     NvVFX_StateObjectHandle state = NULL, denoise_state = NULL;
     const size_t frame_bytes = (size_t)width * height * 3;
-    const int need_mask = background_path || relight_dir;
+    const int need_mask = background_path || blur_enabled || remove_background || relight_dir;
     CUstream stream = NULL;
     NvCVImage src_cpu = {0}, src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
               hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0}, out_cpu = {0},
-              dn_in = {0}, dn_out = {0}, tmp = {0};
+              dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, tmp = {0};
     uint8_t *raw = malloc(frame_bytes);
     float *hdr_pixels = NULL;
     int status = 0;
@@ -230,6 +247,18 @@ int main(int argc, char **argv) {
         CHECK("Set State", set_states(gs, "State", &state));
     }
 
+    if (blur_enabled) {
+        CHECK("Alloc blur input", image_alloc(&blur_in, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
+        CHECK("Alloc blur output", image_alloc(&blur_out, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
+        CHECK("CreateEffect(BackgroundBlur)", create("BackgroundBlur", &blur));
+        CHECK("Set Stream", set_stream(blur, "CudaStream", stream));
+        CHECK("Set SrcImage0", set_image(blur, "SrcImage0", &blur_in));
+        CHECK("Set SrcImage1", set_image(blur, "SrcImage1", &mask));
+        CHECK("Set DstImage0", set_image(blur, "DstImage0", &blur_out));
+        CHECK("Set Strength", set_f32(blur, "Strength", blur_strength));
+        CHECK("Load(BackgroundBlur)", load(blur));
+    }
+
     if (relight_dir) {
         unsigned hw = 0, hh = 0;
         hdr_pixels = read_hdr(hdr_path, &hw, &hh);
@@ -262,15 +291,19 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (background_path) {
-        FILE *bg_file = fopen(background_path, "rb");
-        if (!bg_file || fread(raw, 1, frame_bytes, bg_file) != frame_bytes) {
-            fprintf(stderr, "Could not read %ux%u BGR24 background: %s\n", width, height, background_path);
-            if (bg_file) fclose(bg_file);
-            status = 1;
-            goto cleanup;
+    if (background_path || remove_background) {
+        if (background_path) {
+            FILE *bg_file = fopen(background_path, "rb");
+            if (!bg_file || fread(raw, 1, frame_bytes, bg_file) != frame_bytes) {
+                fprintf(stderr, "Could not read %ux%u BGR24 background: %s\n", width, height, background_path);
+                if (bg_file) fclose(bg_file);
+                status = 1;
+                goto cleanup;
+            }
+            fclose(bg_file);
+        } else {
+            memset(raw, 0, frame_bytes);
         }
-        fclose(bg_file);
         CHECK("Alloc bg CPU", image_alloc(&bg_cpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_CPU, 1));
         CHECK("Alloc bg GPU", image_alloc(&bg_gpu, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
         for (unsigned y = 0; y < height; ++y)
@@ -278,9 +311,10 @@ int main(int argc, char **argv) {
         CHECK("Upload background", image_transfer(&bg_cpu, &bg_gpu, 1.0f, stream, &tmp));
     }
     const NvCVImage *fg = relight ? &relit : &src_rgb;
-    const NvCVImage *bg = background_path ? &bg_gpu : &src_rgb;
-    fprintf(stderr, "Camera effects ready (%s%s%s); reading %ux%u BGR24 frames\n",
+    const NvCVImage *bg = background_path || remove_background ? &bg_gpu : &src_rgb;
+    fprintf(stderr, "Camera effects ready (%s%s%s%s%s); reading %ux%u BGR24 frames\n",
             denoise ? "noise removal " : "", background_path ? "background " : "",
+            blur ? "background blur " : "", remove_background ? "background removal " : "",
             relight ? "Studio Light" : "", width, height);
 
     unsigned long frames = 0;
@@ -317,7 +351,13 @@ int main(int argc, char **argv) {
             CHECK("Blend light", composite(&relit, &src_rgb, &light_mask, &relit, stream));
         }
         CHECK("Composite", composite(fg, bg, &mask, &out_gpu, stream));
-        CHECK("Transfer output", image_transfer(&out_gpu, &out_cpu, 1.0f, stream, &tmp));
+        if (blur) {
+            CHECK("Convert blur input", image_transfer(&out_gpu, &blur_in, 1.0f, stream, &tmp));
+            CHECK("Run(BackgroundBlur)", run(blur, 0));
+            CHECK("Transfer output", image_transfer(&blur_out, &out_cpu, 1.0f, stream, &tmp));
+        } else {
+            CHECK("Transfer output", image_transfer(&out_gpu, &out_cpu, 1.0f, stream, &tmp));
+        }
     write:
         CHECK("Synchronize", stream_sync(stream));
         for (unsigned y = 0; y < height; ++y)
@@ -339,7 +379,7 @@ int main(int argc, char **argv) {
 cleanup:
     {
         NvCVImage *images[] = {&src_cpu, &src_gpu, &src_rgb, &mask, &relit, &projected, &hdr, &light_mask, &scaled_mask,
-                               &bg_cpu, &bg_gpu, &out_gpu, &out_cpu, &dn_in, &dn_out, &tmp};
+                               &bg_cpu, &bg_gpu, &out_gpu, &out_cpu, &dn_in, &dn_out, &blur_in, &blur_out, &tmp};
         for (size_t i = 0; i < sizeof images / sizeof *images; i++)
             if (images[i]->pixels) image_free(images[i]);
     }
@@ -348,6 +388,7 @@ cleanup:
     if (relight) destroy(relight);
     if (denoise_state) free_state(denoise, denoise_state);
     if (denoise) destroy(denoise);
+    if (blur) destroy(blur);
     if (stream) stream_destroy(stream);
     free(hdr_pixels);
     free(raw);
