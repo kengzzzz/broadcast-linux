@@ -106,6 +106,7 @@ pub struct AudioDevice {
     events: EventSender,
     node: Stream,
     input: Slot<Prod>,
+    feeder_thread: Slot<thread::Thread>,
     output: Slot<Cons>,
     stats: Arc<Stats>,
     readers: HashSet<u32>,
@@ -154,6 +155,7 @@ impl AudioDevice {
         events: EventSender,
     ) -> Result<Self> {
         let input = Slot::default();
+        let feeder_thread = Slot::default();
         let output = Slot::default();
         let stats = Arc::<Stats>::default();
         let media_class = match kind {
@@ -172,7 +174,14 @@ impl AudioDevice {
         let flags = pw::stream::StreamFlags::MAP_BUFFERS;
         let node = match kind {
             Kind::Mic => play_stream(core, &name, props, flags, output.clone(), stats.clone())?,
-            Kind::Speaker => record_stream(core, &name, props, flags, input.clone())?,
+            Kind::Speaker => record_stream(
+                core,
+                &name,
+                props,
+                flags,
+                input.clone(),
+                feeder_thread.clone(),
+            )?,
         };
         Ok(Self {
             kind,
@@ -181,6 +190,7 @@ impl AudioDevice {
             events,
             node,
             input,
+            feeder_thread,
             output,
             stats,
             readers: HashSet::new(),
@@ -433,9 +443,10 @@ impl AudioDevice {
         thread::spawn(move || watch_stderr(pipes.stderr, &frame_tx, &events, kind, id));
         {
             let (shared, stats) = (shared.clone(), self.stats.clone());
-            thread::spawn(move || {
+            let feeder = thread::spawn(move || {
                 feed_worker(stdin, in_cons, &inputs, &frame_rx, &shared, &stats);
             });
+            *self.feeder_thread.borrow_mut() = Some(feeder.thread().clone());
         }
         let events = self.events.clone();
         {
@@ -477,6 +488,7 @@ impl AudioDevice {
                 },
                 flags,
                 self.input.clone(),
+                self.feeder_thread.clone(),
             ),
             Kind::Speaker => play_stream(
                 &self.core,
@@ -518,6 +530,7 @@ fn record_stream(
     props: pw::properties::PropertiesBox,
     flags: pw::stream::StreamFlags,
     ring: Slot<Prod>,
+    feeder: Slot<thread::Thread>,
 ) -> Result<Stream> {
     let stream = pw::stream::StreamRc::new(core.clone(), name, props)?;
     let listener = stream
@@ -540,6 +553,9 @@ fn record_stream(
                     .iter()
                     .map(|b| f32::from_le_bytes(*b));
                 ring.push_iter(samples);
+            }
+            if let Some(feeder) = feeder.borrow().as_ref() {
+                feeder.unpark();
             }
         })
         .register()?;
@@ -714,7 +730,7 @@ fn feed_worker(
         }
         if ring.occupied_len() < frame {
             let paused = !shared.active.load(Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(if paused { 50 } else { 2 }));
+            thread::park_timeout(Duration::from_millis(if paused { 50 } else { 20 }));
             continue;
         }
         ring.pop_slice(&mut samples);
