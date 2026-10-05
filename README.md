@@ -13,7 +13,7 @@ runtime and models for your GPU.
 
 - x86_64 Linux (release tarball requires glibc 2.39+)
 - NVIDIA RTX GPU (Turing or newer) with the proprietary driver
-- Wine 11.x, PipeWire and its client library, WirePlumber, `pactl`, ffmpeg
+- Wine 11.x, PipeWire and its client library, WirePlumber, `pactl`, ffmpeg (scales the background image)
 - v4l2loopback and membership in the `video` group for the camera
 
 ## Install
@@ -74,7 +74,7 @@ docker build --output type=local,dest=dist .   # release tarball
 ```
 
 Local build: Rust via rustup, Wine 11 (`winegcc` and headers), PipeWire headers,
-clang, pkg-config, meson, ninja. `rust-toolchain.toml` pins Rust for local builds,
+clang, pkg-config, meson, ninja, cmake, nasm. `rust-toolchain.toml` pins Rust for local builds,
 CI checks and Docker releases.
 
 CI checks code pushes to `main` and pull requests; Markdown/licence-only changes
@@ -87,4 +87,6 @@ AUR publishing steps: [packaging/README.md](packaging/README.md).
 ## Licence
 
 MIT. Bundled [nvcuda](https://github.com/SveSop/nvcuda) relay: LGPL-2.1-or-later.
+Statically linked [libjpeg-turbo](https://libjpeg-turbo.org): IJG and BSD-3-Clause
+([licence](packaging/LICENSE.libjpeg-turbo)).
 NVIDIA files are downloaded under NVIDIA's licence, accepted during `setup`.

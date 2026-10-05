@@ -1,19 +1,22 @@
-use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Read};
-use std::os::fd::AsRawFd;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::process::{ChildStdout, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::config::CameraConfig;
+use crate::frames::{Decoder, Layout, SLOTS, SharedFrames};
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
-use crate::v4l2::{self, Loopback};
-use crate::webcam;
+use crate::v4l2::Loopback;
+use crate::webcam::{self, Capture};
 use crate::worker::{Launch, Worker};
 
 /// Placeholder rate while no effect is running; enough to keep the device listed.
@@ -73,19 +76,85 @@ impl Drop for Camera {
     }
 }
 
+/// Fields drop in order: closing `tokens` and stopping the worker unblock the feed
+/// before it is joined.
 struct Session {
+    tokens: File,
     _worker: Option<Worker>,
-    capture: Child,
-    stdout: ChildStdout,
-    frame: Vec<u8>,
-    filled: usize,
+    _feed: Feed,
+    frames: Arc<SharedFrames>,
+    free: Sender<usize>,
     live: bool,
 }
 
-impl Drop for Session {
+struct Feed {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Feed {
+    fn start(
+        mut capture: Capture,
+        mut decoder: Decoder,
+        frames: Arc<SharedFrames>,
+        free: Receiver<usize>,
+        mut tokens: PipeWriter,
+        to_worker: bool,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut slot = None;
+            while !flag.load(Ordering::Relaxed) {
+                let k = match slot.take() {
+                    Some(k) => k,
+                    None => match free.recv_timeout(Duration::from_millis(100)) {
+                        Ok(k) => k,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                };
+                let sent = capture.newest(Duration::from_millis(100), |frame| -> Result<bool> {
+                    // SAFETY: slot k came back as free, so nothing else uses it until
+                    // its number is sent on below.
+                    let filled = if to_worker {
+                        decoder.fill_for_worker(frame, unsafe { frames.input(k) })?
+                    } else {
+                        decoder.fill_for_loopback(frame, unsafe { frames.output(k) })?
+                    };
+                    if filled {
+                        tokens.write_all(&[u8::try_from(k)?])?;
+                    }
+                    Ok(filled)
+                });
+                match sent {
+                    Ok(Some(Ok(true))) => {}
+                    Ok(None | Some(Ok(false))) => slot = Some(k),
+                    Ok(Some(Err(e))) | Err(e) => {
+                        let closed = e
+                            .downcast_ref::<io::Error>()
+                            .is_some_and(|e| e.kind() == ErrorKind::BrokenPipe);
+                        if !closed {
+                            eprintln!("camera: {e:#}");
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Feed {
     fn drop(&mut self) {
-        let _ = self.capture.kill();
-        let _ = self.capture.wait();
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -104,7 +173,6 @@ struct CameraLoop {
     retry_at: Option<Instant>,
     failures: u32,
     placeholder: Vec<u8>,
-    yuyv: Vec<u8>,
 }
 
 impl CameraLoop {
@@ -116,7 +184,7 @@ impl CameraLoop {
         commands: Receiver<Control>,
     ) -> Self {
         let (width, height) = (config.width, config.height);
-        let yuyv_frame = width as usize * height as usize * 2;
+        let frame = width as usize * height as usize * 2;
         Self {
             paths,
             config,
@@ -130,8 +198,7 @@ impl CameraLoop {
             idle_since: None,
             retry_at: None,
             failures: 0,
-            placeholder: [16u8, 128].repeat(yuyv_frame / 2),
-            yuyv: vec![0; yuyv_frame],
+            placeholder: [16u8, 128].repeat(frame / 2),
         }
     }
 
@@ -178,7 +245,7 @@ impl CameraLoop {
         }];
         if let Some(session) = &self.session {
             fds.push(libc::pollfd {
-                fd: session.stdout.as_raw_fd(),
+                fd: session.tokens.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -275,40 +342,73 @@ impl CameraLoop {
     }
 
     fn start_session(&self) -> Result<Session> {
-        let format = webcam::choose(&self.config.input, self.config.input_format, &self.size())?;
-        eprintln!("camera: capturing {} as {format}", self.config.input);
-        let mut capture = Command::new("ffmpeg")
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "v4l2", "-input_format", format])
-            .args(["-framerate", &self.config.fps.to_string()])
-            .args(["-video_size", &self.size(), "-i", &self.config.input])
-            .args(["-pix_fmt", "bgr24", "-f", "rawvideo", "-"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("starting ffmpeg for the webcam")?;
-        let frames = capture.stdout.take().context("ffmpeg stdout")?;
-        let (worker, stdout) = if self.config.has_effects() {
-            let (worker, stdout) = self.spawn_worker(frames)?;
-            (Some(worker), stdout)
-        } else {
-            (None, frames)
+        let input = &self.config.input;
+        let format = webcam::choose(input, self.config.input_format, self.width, self.height)?;
+        eprintln!("camera: capturing {input} as {}", format.label());
+        let mut capture = Capture::open(input, format, self.width, self.height, self.config.fps)?;
+        // MJPEG chroma subsampling is only known from a frame.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let decoder = loop {
+            if let Some(decoder) = capture.newest(Duration::from_millis(200), |frame| {
+                Decoder::new(format, frame, self.width, self.height)
+            })? {
+                break decoder?;
+            }
+            if Instant::now() >= deadline {
+                bail!("{input} sent no frames");
+            }
         };
-        set_nonblocking(stdout.as_raw_fd())?;
-        Ok(Session {
-            _worker: worker,
+        let effects = self.config.has_effects();
+        let in_bytes = if effects { decoder.worker_bytes() } else { 0 };
+        let frames = Arc::new(SharedFrames::new(in_bytes, self.placeholder.len())?);
+        let (tokens_in, tokens_out) = io::pipe()?;
+        let (worker, tokens) = if effects {
+            let (worker, stdout) =
+                self.spawn_worker(Stdio::from(tokens_in), decoder.layout(), &frames.path())?;
+            (Some(worker), File::from(OwnedFd::from(stdout)))
+        } else {
+            (None, File::from(OwnedFd::from(tokens_in)))
+        };
+        set_nonblocking(tokens.as_raw_fd())?;
+        let (free, free_slots) = mpsc::channel();
+        for k in 0..SLOTS {
+            let _ = free.send(k);
+        }
+        let feed = Feed::start(
             capture,
-            stdout,
-            frame: vec![0; self.width as usize * self.height as usize * 3],
-            filled: 0,
+            decoder,
+            Arc::clone(&frames),
+            free_slots,
+            tokens_out,
+            effects,
+        );
+        Ok(Session {
+            tokens,
+            _worker: worker,
+            _feed: feed,
+            frames,
+            free,
             live: false,
         })
     }
 
-    fn spawn_worker(&self, frames: ChildStdout) -> Result<(Worker, ChildStdout)> {
+    fn spawn_worker(
+        &self,
+        tokens: Stdio,
+        layout: Layout,
+        frames: &str,
+    ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
         let models = install.model_dir("nvbcast_vfx_gs_v0_9")?;
-        let mut args = vec![nvidia::windows_path(&models), "--size".into(), self.size()];
+        let mut args = vec![
+            nvidia::windows_path(&models),
+            "--size".into(),
+            self.size(),
+            "--input".into(),
+            layout.worker_name().into(),
+            "--shm".into(),
+            frames.into(),
+        ];
         if self.config.video_noise_removal.enabled {
             let models = install.model_dir("nvbcast_vfx_lld_v0_9")?;
             args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
@@ -348,7 +448,7 @@ impl CameraLoop {
             prefix: self.paths.prefix(),
             cwd: install.runtime,
             args,
-            stdin: Some(Stdio::from(frames)),
+            stdin: Some(tokens),
         })?;
         thread::spawn(move || {
             for line in BufReader::new(pipes.stderr).lines().map_while(Result::ok) {
@@ -366,8 +466,9 @@ impl CameraLoop {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        let mut tokens = [0u8; 16];
         loop {
-            match session.stdout.read(&mut session.frame[session.filled..]) {
+            match session.tokens.read(&mut tokens) {
                 Ok(0) => {
                     eprintln!("camera: worker exited");
                     self.stop();
@@ -377,17 +478,27 @@ impl CameraLoop {
                     return;
                 }
                 Ok(n) => {
-                    session.filled += n;
-                    if session.filled == session.frame.len() {
-                        session.filled = 0;
-                        if !session.live {
-                            session.live = true;
-                            self.failures = 0;
-                            eprintln!("camera: effect running");
-                        }
-                        v4l2::bgr_to_yuyv(&session.frame, &mut self.yuyv);
-                        let _ = self.loopback.write_frame(&self.yuyv);
+                    let slots: Vec<usize> = tokens[..n].iter().map(|&k| usize::from(k)).collect();
+                    if slots.iter().any(|&k| k >= SLOTS) {
+                        eprintln!("camera: the worker sent a bad frame slot");
+                        self.stop();
+                        return;
                     }
+                    // Show only the newest finished frame and hand older ones straight back.
+                    let (&newest, older) = slots.split_last().unwrap_or((&0, &[]));
+                    for &k in older {
+                        let _ = session.free.send(k);
+                    }
+                    if !session.live {
+                        session.live = true;
+                        self.failures = 0;
+                        eprintln!("camera: effect running");
+                    }
+                    // SAFETY: the token gives this thread slot `newest` until it is sent back.
+                    let _ = self
+                        .loopback
+                        .write_frame(unsafe { session.frames.output(newest) });
+                    let _ = session.free.send(newest);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}

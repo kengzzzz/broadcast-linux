@@ -14,7 +14,7 @@ RUN dpkg --add-architecture i386 \
  && apt-get install -y --no-install-recommends \
       "wine-stable=$WINE_VERSION" "wine-stable-amd64=$WINE_VERSION" "wine-stable-i386=$WINE_VERSION" \
       "wine-stable-dev=$WINE_VERSION" gcc g++ libc6-dev clang libclang-dev pkg-config \
-      libpipewire-0.3-dev libspa-0.2-dev meson ninja-build git patch \
+      libpipewire-0.3-dev libspa-0.2-dev meson ninja-build git patch cmake make nasm \
  && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:/opt/wine-stable/bin:$PATH
 WORKDIR /src

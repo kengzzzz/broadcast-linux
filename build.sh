@@ -3,8 +3,9 @@
 #   OUT/bin/broadcast-linux
 #   OUT/lib/broadcast-linux/wine/     the patched nvcuda relay
 #   OUT/lib/broadcast-linux/workers/  the Wine worker programs
-# Needs the wine-nvcuda and vfx-api submodules, cargo, Wine's winegcc and headers,
-# meson, ninja and mingw-w64. Extra cargo flags can be passed in CARGO_ARGS.
+# Needs the wine-nvcuda and vfx-api submodules, cargo, cmake and nasm (for libjpeg-turbo),
+# Wine's winegcc and headers, meson, ninja and mingw-w64. Extra cargo flags can be passed
+# in CARGO_ARGS.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

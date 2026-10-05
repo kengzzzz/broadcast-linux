@@ -15,6 +15,7 @@ install -Dm755 "$root/packaging/install.sh" "$stage/install.sh"
 install -Dm644 -t "$stage" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE"
 install -Dm644 "$root/wine-nvcuda/LICENSE.md" "$stage/LICENSE.nvcuda.md"
 install -Dm644 "$root/vfx-api/LICENSE" "$stage/LICENSE.nvidia-vfx-headers"
+install -Dm644 "$root/packaging/LICENSE.libjpeg-turbo" "$stage/LICENSE.libjpeg-turbo"
 {
     echo "broadcast-linux $version"
     echo "built on: $(. /etc/os-release && echo "$PRETTY_NAME"), $(ldd --version | head -1)"

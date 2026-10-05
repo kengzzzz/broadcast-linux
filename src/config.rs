@@ -230,14 +230,6 @@ pub enum InputFormat {
 }
 
 impl InputFormat {
-    pub fn ffmpeg_name(self) -> &'static str {
-        match self {
-            Self::Auto | Self::Mjpeg => "mjpeg",
-            Self::Yuyv => "yuyv422",
-            Self::Nv12 => "nv12",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "supported",

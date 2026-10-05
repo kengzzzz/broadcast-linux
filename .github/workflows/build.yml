@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - run: pacman -Syu --noconfirm --needed git rustup clang libpipewire
+      - run: pacman -Syu --noconfirm --needed git rustup clang cmake nasm libpipewire
       - uses: actions/checkout@v5
       - name: Lint and test
         run: |

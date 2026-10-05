@@ -6,9 +6,9 @@ pkgrel=1
 pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
 url="https://github.com/kengzzzz/broadcast-linux"
-license=(MIT LGPL-2.1-or-later)
+license=(MIT LGPL-2.1-or-later BSD-3-Clause IJG)
 depends=(gcc-libs glibc libpipewire pipewire wireplumber libpulse 'wine>=11' ffmpeg nvidia-utils)
-makedepends=(cargo clang git meson ninja)
+makedepends=(cargo clang cmake git meson nasm ninja)
 optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)')
 options=(!lto !debug)
 install=broadcast-linux.install
@@ -47,4 +47,5 @@ package() {
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 wine-nvcuda/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvcuda.md"
     install -Dm644 vfx-api/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvidia-vfx-headers"
+    install -Dm644 packaging/LICENSE.libjpeg-turbo "$pkgdir/usr/share/licenses/$pkgname/LICENSE.libjpeg-turbo"
 }

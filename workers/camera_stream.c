@@ -3,10 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <windows.h>
 #include "nvVideoEffects.h"
 
 #define DEGREES (3.14159265f / 180.0f)
+#define CU_CTX_SCHED_BLOCKING_SYNC 0x04
+#define SLOTS 2
 
 typedef int (WINAPI *create_fn)(const char *, NvVFX_Handle *);
 typedef void (WINAPI *destroy_fn)(NvVFX_Handle);
@@ -25,6 +30,8 @@ typedef int (WINAPI *set_image_fn)(NvVFX_Handle, const char *, NvCVImage *);
 typedef int (WINAPI *run_fn)(NvVFX_Handle, int);
 typedef int (WINAPI *image_alloc_fn)(NvCVImage *, unsigned, unsigned, NvCVImage_PixelFormat,
                                      NvCVImage_ComponentType, unsigned, unsigned, unsigned);
+typedef int (WINAPI *image_init_fn)(NvCVImage *, unsigned, unsigned, int, void *, NvCVImage_PixelFormat,
+                                    NvCVImage_ComponentType, unsigned, unsigned);
 typedef void (WINAPI *image_free_fn)(NvCVImage *);
 typedef int (WINAPI *image_transfer_fn)(const NvCVImage *, NvCVImage *, float, CUstream, NvCVImage *);
 typedef int (WINAPI *composite_fn)(const NvCVImage *, const NvCVImage *, const NvCVImage *, NvCVImage *,
@@ -109,22 +116,77 @@ fail:
     return NULL;
 }
 
+/* NVIDIA's effects synchronize internally; the default spin-wait burns a core while the GPU works.
+ * Primary context flags only apply before the context starts, so this runs before any effect. */
+static void use_blocking_sync(void) {
+    typedef int (WINAPI *init_fn)(unsigned);
+    typedef int (WINAPI *count_fn)(int *);
+    typedef int (WINAPI *set_flags_fn)(int, unsigned);
+    HMODULE cuda = LoadLibraryA("nvcuda.dll");
+    if (!cuda)
+        return;
+    RESOLVE(init_fn, init, cuda, "cuInit");
+    RESOLVE(count_fn, count, cuda, "cuDeviceGetCount");
+    RESOLVE(set_flags_fn, set_flags, cuda, "cuDevicePrimaryCtxSetFlags");
+    int devices = 0;
+    if (!init || !count || !set_flags || init(0) || count(&devices))
+        return;
+    for (int d = 0; d < devices; d++)
+        if (set_flags(d, CU_CTX_SCHED_BLOCKING_SYNC))
+            fprintf(stderr, "Could not set blocking sync on GPU %d; the worker will spin while waiting\n", d);
+}
+
+/* Page-locks shared frame memory so uploads and downloads skip CUDA's staging copy. */
+static int pin_host(void *pixels, size_t bytes, int pin) {
+    typedef int (WINAPI *register_fn)(void *, size_t, unsigned);
+    typedef int (WINAPI *unregister_fn)(void *);
+    HMODULE cuda = GetModuleHandleA("nvcuda.dll");
+    if (!cuda)
+        return -1;
+    if (!pin) {
+        RESOLVE(unregister_fn, unregister, cuda, "cuMemHostUnregister");
+        return unregister ? unregister(pixels) : -1;
+    }
+    RESOLVE(register_fn, reg, cuda, "cuMemHostRegister_v2");
+    return reg ? reg(pixels, bytes, 0) : -1;
+}
+
+/* Input frame formats: webcam YUV is limited range, decoded MJPEG (jNNN) is full range. */
+static const struct input_format {
+    const char *name;
+    NvCVImage_PixelFormat format;
+    unsigned layout, colorspace, bits_per_pixel, row_bytes_per_pixel;
+} input_formats[] = {
+    {"bgr24", NVCV_BGR, NVCV_CHUNKY, 0, 24, 3},
+    {"yuyv", NVCV_YUV422, NVCV_YUYV, NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL, 16, 2},
+    {"nv12", NVCV_YUV420, NVCV_NV12, NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL, 12, 1},
+    {"j420", NVCV_YUV420, NVCV_I420, NVCV_601 | NVCV_FULL_RANGE | NVCV_CHROMA_JPEG, 12, 1},
+    {"j422", NVCV_YUV422, NVCV_YUV, NVCV_601 | NVCV_FULL_RANGE | NVCV_CHROMA_JPEG, 16, 1},
+    {"j444", NVCV_YUV444, NVCV_YUV, NVCV_601 | NVCV_FULL_RANGE | NVCV_CHROMA_JPEG, 24, 1},
+};
+
 static void usage(void) {
     fprintf(stderr,
-            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
+            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT] [--shm FILE]\n"
+            "           [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
             "           [--background FILE.bgr | --blur 0..1 | --remove-background]\n"
             "           [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
-            "           < input.bgr > output.bgr\n"
-            "Frames and the background are BGR24 at --size. Removal fills the background black.\n");
+            "           < input > output.yuyv\n"
+            "FORMAT is bgr24 (default), yuyv, nv12, or planar full-range j420, j422 or j444.\n"
+            "With --shm, FILE holds 2 input frames then 2 output frames, and stdin and stdout carry\n"
+            "one byte per frame: the slot to process, then the slot that is done.\n"
+            "The background is BGR24 at --size; output frames are YUYV (BT.601, limited range).\n"
+            "Removal fills the background black.\n");
 }
 
 int main(int argc, char **argv) {
     const char *gs_dir = NULL, *background_path = NULL, *relight_dir = NULL, *hdr_path = NULL,
-               *denoise_dir = NULL;
+               *denoise_dir = NULL, *shm_path = NULL;
     float strength = 1, denoise_strength = 1;
     float blur_strength = 0.5f;
     int blur_enabled = 0, remove_background = 0;
     unsigned width = 0, height = 0;
+    const struct input_format *input = &input_formats[0];
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *next = i + 1 < argc ? argv[i + 1] : NULL;
@@ -144,13 +206,25 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--denoise") && next) denoise_dir = argv[++i];
         else if (!strcmp(a, "--denoise-strength") && next) denoise_strength = (float)atof(argv[++i]);
         else if (!strcmp(a, "--size") && next && sscanf(argv[++i], "%ux%u", &width, &height) == 2) {}
+        else if (!strcmp(a, "--shm") && next) shm_path = argv[++i];
+        else if (!strcmp(a, "--input") && next) {
+            const char *name = argv[++i];
+            input = NULL;
+            for (size_t f = 0; f < sizeof input_formats / sizeof *input_formats; f++)
+                if (!strcmp(name, input_formats[f].name)) input = &input_formats[f];
+            if (!input) {
+                usage();
+                return 2;
+            }
+        }
         else if (a[0] != '-' && !gs_dir) gs_dir = a;
         else {
             usage();
             return 2;
         }
     }
-    if (!gs_dir || !width || !height || width % 2 || !relight_dir != !hdr_path) {
+    if (!gs_dir || !width || !height || width % 2 || (input->bits_per_pixel == 12 && height % 2) ||
+        !relight_dir != !hdr_path) {
         usage();
         return 2;
     }
@@ -161,6 +235,7 @@ int main(int argc, char **argv) {
     /* NVIDIA's filter still blurs at strength zero; make zero a true passthrough. */
     if (blur_strength == 0) blur_enabled = 0;
 
+    use_blocking_sync();
     HMODULE vfx = LoadLibraryA("NVVideoEffects.dll");
     HMODULE cv = LoadLibraryA("NVCVImage.dll");
     if (!vfx || !cv) {
@@ -184,39 +259,76 @@ int main(int argc, char **argv) {
     RESOLVE(set_image_fn, set_image, vfx, "NvVFX_SetImage");
     RESOLVE(run_fn, run, vfx, "NvVFX_Run");
     RESOLVE(image_alloc_fn, image_alloc, cv, "NvCVImage_Alloc");
+    RESOLVE(image_init_fn, image_init, cv, "NvCVImage_Init");
     RESOLVE(image_free_fn, image_free, cv, "NvCVImage_Dealloc");
     RESOLVE(image_transfer_fn, image_transfer, cv, "NvCVImage_Transfer");
     RESOLVE(composite_fn, composite, cv, "NvCVImage_Composite");
     if (!create || !destroy || !set_string || !set_u32 || !set_f32 || !set_stream || !stream_create ||
         !stream_destroy || !stream_sync || !load || !alloc_state || !free_state || !set_states ||
-        !set_image || !run || !image_alloc || !image_free || !image_transfer || !composite) {
+        !set_image || !run || !image_alloc || !image_init || !image_free || !image_transfer || !composite) {
         fprintf(stderr, "A required VFX export is missing\n");
         return 1;
     }
 
     NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL, blur = NULL;
     NvVFX_StateObjectHandle state = NULL, denoise_state = NULL;
-    const size_t frame_bytes = (size_t)width * height * 3;
+    const size_t frame_bytes = (size_t)width * height * 3, out_bytes = (size_t)width * height * 2,
+                 in_bytes = (size_t)width * height * input->bits_per_pixel / 8;
     const int need_mask = background_path || blur_enabled || remove_background || relight_dir;
     CUstream stream = NULL;
-    NvCVImage src_cpu = {0}, src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
-              hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0}, out_cpu = {0},
+    NvCVImage src_slots[SLOTS] = {{0}}, out_slots[SLOTS] = {{0}};
+    NvCVImage src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
+              hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0},
               dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, tmp = {0};
-    uint8_t *raw = malloc(frame_bytes);
     float *hdr_pixels = NULL;
-    int status = 0;
-    if (!raw) {
-        fprintf(stderr, "Out of host memory\n");
-        return 1;
-    }
+    uint8_t *shm = MAP_FAILED;
+    const size_t shm_bytes = SLOTS * (in_bytes + out_bytes);
+    int status = 0, pinned = 0;
 
     CHECK("CreateStream", stream_create(&stream));
-    CHECK("Alloc src CPU", image_alloc(&src_cpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_CPU, 1));
+    if (shm_path) {
+        int fd = open(shm_path, O_RDWR);
+        if (fd >= 0) {
+            shm = mmap(NULL, shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            close(fd);
+        }
+        if (shm == MAP_FAILED) {
+            fprintf(stderr, "Could not map %s\n", shm_path);
+            status = 1;
+            goto cleanup;
+        }
+        pinned = pin_host(shm, shm_bytes, 1) == 0;
+        if (!pinned)
+            fprintf(stderr, "Could not pin shared frames; transfers will be slower\n");
+        const unsigned mem = pinned ? NVCV_CPU_PINNED : NVCV_CPU;
+        for (int k = 0; k < SLOTS; k++) {
+            CHECK("Init src slot", image_init(&src_slots[k], width, height, (int)(width * input->row_bytes_per_pixel),
+                                              shm + k * in_bytes, input->format, NVCV_U8, input->layout, mem));
+            CHECK("Init out slot", image_init(&out_slots[k], width, height, (int)(width * 2),
+                                              shm + SLOTS * in_bytes + k * out_bytes, NVCV_YUV422, NVCV_U8, NVCV_YUYV,
+                                              mem));
+        }
+    } else {
+        if (image_alloc(&src_slots[0], width, height, input->format, NVCV_U8, input->layout, NVCV_CPU_PINNED, 1))
+            CHECK("Alloc src CPU", image_alloc(&src_slots[0], width, height, input->format, NVCV_U8, input->layout, NVCV_CPU, 1));
+        if (image_alloc(&out_slots[0], width, height, NVCV_YUV422, NVCV_U8, NVCV_YUYV, NVCV_CPU_PINNED, 1))
+            CHECK("Alloc out CPU", image_alloc(&out_slots[0], width, height, NVCV_YUV422, NVCV_U8, NVCV_YUYV, NVCV_CPU, 1));
+        /* Frames are read and written whole, so the buffers must be tightly packed. */
+        if (src_slots[0].bufferBytes != in_bytes || out_slots[0].bufferBytes != out_bytes) {
+            fprintf(stderr, "Unexpected frame layout: %llu/%llu bytes\n", src_slots[0].bufferBytes,
+                    out_slots[0].bufferBytes);
+            status = 1;
+            goto cleanup;
+        }
+    }
+    for (int k = 0; k < SLOTS; k++) {
+        src_slots[k].colorspace = (unsigned char)input->colorspace;
+        out_slots[k].colorspace = NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL;
+    }
     CHECK("Alloc src GPU", image_alloc(&src_gpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
     CHECK("Alloc src RGB", image_alloc(&src_rgb, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
     CHECK("Alloc mask", image_alloc(&mask, width, height, NVCV_A, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
     CHECK("Alloc out GPU", image_alloc(&out_gpu, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
-    CHECK("Alloc out CPU", image_alloc(&out_cpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_CPU, 1));
 
     if (denoise_dir) {
         CHECK("Alloc denoise in", image_alloc(&dn_in, width, height, NVCV_BGR, NVCV_F32, NVCV_PLANAR, NVCV_GPU, 1));
@@ -292,9 +404,11 @@ int main(int argc, char **argv) {
     }
 
     if (background_path || remove_background) {
+        CHECK("Alloc bg CPU", image_alloc(&bg_cpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_CPU, 1));
+        CHECK("Alloc bg GPU", image_alloc(&bg_gpu, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
         if (background_path) {
             FILE *bg_file = fopen(background_path, "rb");
-            if (!bg_file || fread(raw, 1, frame_bytes, bg_file) != frame_bytes) {
+            if (!bg_file || fread(bg_cpu.pixels, 1, frame_bytes, bg_file) != frame_bytes) {
                 fprintf(stderr, "Could not read %ux%u BGR24 background: %s\n", width, height, background_path);
                 if (bg_file) fclose(bg_file);
                 status = 1;
@@ -302,41 +416,47 @@ int main(int argc, char **argv) {
             }
             fclose(bg_file);
         } else {
-            memset(raw, 0, frame_bytes);
+            memset(bg_cpu.pixels, 0, frame_bytes);
         }
-        CHECK("Alloc bg CPU", image_alloc(&bg_cpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_CPU, 1));
-        CHECK("Alloc bg GPU", image_alloc(&bg_gpu, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
-        for (unsigned y = 0; y < height; ++y)
-            memcpy((uint8_t *)bg_cpu.pixels + y * bg_cpu.pitch, raw + y * width * 3, width * 3);
         CHECK("Upload background", image_transfer(&bg_cpu, &bg_gpu, 1.0f, stream, &tmp));
     }
     const NvCVImage *fg = relight ? &relit : &src_rgb;
     const NvCVImage *bg = background_path || remove_background ? &bg_gpu : &src_rgb;
-    fprintf(stderr, "Camera effects ready (%s%s%s%s%s); reading %ux%u BGR24 frames\n",
+    fprintf(stderr, "Camera effects ready (%s%s%s%s%s); reading %ux%u %s frames, writing YUYV\n",
             denoise ? "noise removal " : "", background_path ? "background " : "",
             blur ? "background blur " : "", remove_background ? "background removal " : "",
-            relight ? "Studio Light" : "", width, height);
+            relight ? "Studio Light" : "", width, height, input->name);
 
     unsigned long frames = 0;
     ULONGLONG started = GetTickCount64();
     for (;;) {
-        size_t got = fread(raw, 1, frame_bytes, stdin);
-        if (got == 0 && feof(stdin)) break;
-        if (got != frame_bytes) {
-            fprintf(stderr, "Incomplete input frame after %lu frames (%zu bytes)\n", frames, got);
-            status = 1;
-            goto cleanup;
+        int k = 0;
+        if (shm != MAP_FAILED) {
+            k = getchar();
+            if (k == EOF) break;
+            if (k >= SLOTS) {
+                fprintf(stderr, "Bad frame slot %d\n", k);
+                status = 1;
+                goto cleanup;
+            }
+        } else {
+            size_t got = fread(src_slots[0].pixels, 1, in_bytes, stdin);
+            if (got == 0 && feof(stdin)) break;
+            if (got != in_bytes) {
+                fprintf(stderr, "Incomplete input frame after %lu frames (%zu bytes)\n", frames, got);
+                status = 1;
+                goto cleanup;
+            }
         }
-        for (unsigned y = 0; y < height; ++y)
-            memcpy((uint8_t *)src_cpu.pixels + y * src_cpu.pitch, raw + y * width * 3, width * 3);
-        CHECK("Transfer input", image_transfer(&src_cpu, &src_gpu, 1.0f, stream, &tmp));
+        NvCVImage *src_cpu = &src_slots[k], *out_cpu = &out_slots[k];
+        CHECK("Transfer input", image_transfer(src_cpu, &src_gpu, 1.0f, stream, &tmp));
         if (denoise) {
             CHECK("Denoise input", image_transfer(&src_gpu, &dn_in, 1.0f / 255.0f, stream, &tmp));
             CHECK("Run(Denoising)", run(denoise, 0));
             CHECK("Denoise output", image_transfer(&dn_out, &src_gpu, 255.0f, stream, &tmp));
         }
         if (!need_mask) {
-            CHECK("Transfer output", image_transfer(&src_gpu, &out_cpu, 1.0f, stream, &tmp));
+            CHECK("Transfer output", image_transfer(&src_gpu, out_cpu, 1.0f, stream, &tmp));
             goto write;
         }
         CHECK("Run(GreenScreen)", run(gs, 0));
@@ -354,15 +474,14 @@ int main(int argc, char **argv) {
         if (blur) {
             CHECK("Convert blur input", image_transfer(&out_gpu, &blur_in, 1.0f, stream, &tmp));
             CHECK("Run(BackgroundBlur)", run(blur, 0));
-            CHECK("Transfer output", image_transfer(&blur_out, &out_cpu, 1.0f, stream, &tmp));
+            CHECK("Transfer output", image_transfer(&blur_out, out_cpu, 1.0f, stream, &tmp));
         } else {
-            CHECK("Transfer output", image_transfer(&out_gpu, &out_cpu, 1.0f, stream, &tmp));
+            CHECK("Transfer output", image_transfer(&out_gpu, out_cpu, 1.0f, stream, &tmp));
         }
     write:
         CHECK("Synchronize", stream_sync(stream));
-        for (unsigned y = 0; y < height; ++y)
-            memcpy(raw + y * width * 3, (uint8_t *)out_cpu.pixels + y * out_cpu.pitch, width * 3);
-        if (fwrite(raw, 1, frame_bytes, stdout) != frame_bytes || fflush(stdout) != 0) {
+        if ((shm != MAP_FAILED ? putchar(k) == EOF : fwrite(out_cpu->pixels, 1, out_bytes, stdout) != out_bytes) ||
+            fflush(stdout) != 0) {
             fprintf(stderr, "Output pipe closed after %lu frames\n", frames);
             status = 1;
             goto cleanup;
@@ -378,10 +497,18 @@ int main(int argc, char **argv) {
 
 cleanup:
     {
-        NvCVImage *images[] = {&src_cpu, &src_gpu, &src_rgb, &mask, &relit, &projected, &hdr, &light_mask, &scaled_mask,
-                               &bg_cpu, &bg_gpu, &out_gpu, &out_cpu, &dn_in, &dn_out, &blur_in, &blur_out, &tmp};
+        NvCVImage *images[] = {&src_gpu, &src_rgb, &mask, &relit, &projected, &hdr, &light_mask, &scaled_mask,
+                               &bg_cpu, &bg_gpu, &out_gpu, &dn_in, &dn_out, &blur_in, &blur_out, &tmp};
         for (size_t i = 0; i < sizeof images / sizeof *images; i++)
             if (images[i]->pixels) image_free(images[i]);
+        for (int k = 0; k < SLOTS; k++) {
+            if (src_slots[k].deletePtr) image_free(&src_slots[k]);
+            if (out_slots[k].deletePtr) image_free(&out_slots[k]);
+        }
+    }
+    if (shm != MAP_FAILED) {
+        if (pinned) pin_host(shm, shm_bytes, 0);
+        munmap(shm, shm_bytes);
     }
     if (state) free_state(gs, state);
     if (gs) destroy(gs);
@@ -391,7 +518,6 @@ cleanup:
     if (blur) destroy(blur);
     if (stream) stream_destroy(stream);
     free(hdr_pixels);
-    free(raw);
     FreeLibrary(cv);
     FreeLibrary(vfx);
     return status == 0 ? 0 : 1;

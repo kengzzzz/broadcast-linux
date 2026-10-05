@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 
-const VIDIOC_S_FMT: libc::c_ulong = 0xC0D0_5605;
+pub(crate) const VIDIOC_S_FMT: libc::c_ulong = 0xC0D0_5605;
 const VIDIOC_SUBSCRIBE_EVENT: libc::c_ulong = 0x4020_565A;
 const VIDIOC_DQEVENT: libc::c_ulong = 0x8088_5659;
 /// v4l2loopback's private event: 1 while some app streams from the device.
@@ -14,31 +14,42 @@ const EVENT_CLIENT_USAGE: u32 = 0x0800_0000 + 0x08E0_0000 + 1;
 const BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
 const FIELD_NONE: u32 = 1;
 const COLORSPACE_SRGB: u32 = 8;
-const YUYV: u32 = u32::from_le_bytes(*b"YUYV");
+pub(crate) const YUYV: u32 = u32::from_le_bytes(*b"YUYV");
 
 #[repr(C)]
-struct PixFormat {
-    width: u32,
-    height: u32,
-    pixelformat: u32,
-    field: u32,
-    bytesperline: u32,
-    sizeimage: u32,
-    colorspace: u32,
-    priv_: u32,
-    flags: u32,
-    ycbcr_enc: u32,
-    quantization: u32,
-    xfer_func: u32,
+pub(crate) struct PixFormat {
+    pub width: u32,
+    pub height: u32,
+    pub pixelformat: u32,
+    pub field: u32,
+    pub bytesperline: u32,
+    pub sizeimage: u32,
+    pub colorspace: u32,
+    pub priv_: u32,
+    pub flags: u32,
+    pub ycbcr_enc: u32,
+    pub quantization: u32,
+    pub xfer_func: u32,
 }
 
 /// `struct v4l2_format`: the union starts 8-byte aligned and is 200 bytes.
 #[repr(C)]
-struct Format {
-    type_: u32,
+pub(crate) struct Format {
+    pub type_: u32,
     _align: u32,
-    pix: PixFormat,
+    pub pix: PixFormat,
     _rest: [u8; 200 - size_of::<PixFormat>()],
+}
+
+impl Format {
+    pub fn new(type_: u32, pix: PixFormat) -> Self {
+        Self {
+            type_,
+            _align: 0,
+            pix,
+            _rest: [0; 200 - size_of::<PixFormat>()],
+        }
+    }
 }
 
 #[repr(C)]
@@ -61,10 +72,9 @@ impl Loopback {
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
             .map_err(|e| anyhow!("opening {path}: {e}{}", open_hint(&e)))?;
-        let mut format = Format {
-            type_: BUF_TYPE_VIDEO_OUTPUT,
-            _align: 0,
-            pix: PixFormat {
+        let mut format = Format::new(
+            BUF_TYPE_VIDEO_OUTPUT,
+            PixFormat {
                 width,
                 height,
                 pixelformat: YUYV,
@@ -78,8 +88,7 @@ impl Loopback {
                 quantization: 0,
                 xfer_func: 0,
             },
-            _rest: [0; 200 - size_of::<PixFormat>()],
-        };
+        );
         // SAFETY: `format` matches the kernel's struct v4l2_format layout (208 bytes).
         if unsafe { libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, &raw mut format) } < 0 {
             let e = io::Error::last_os_error();
@@ -214,52 +223,9 @@ fn devices_hint() -> String {
     )
 }
 
-/// Converts packed BGR24 to YUYV (BT.601, limited range), two pixels at a time.
-#[allow(clippy::many_single_char_names)]
-pub fn bgr_to_yuyv(bgr: &[u8], yuyv: &mut [u8]) {
-    for (src, dst) in bgr
-        .as_chunks::<6>()
-        .0
-        .iter()
-        .zip(yuyv.as_chunks_mut::<4>().0)
-    {
-        let px = |i: usize| {
-            (
-                i32::from(src[i + 2]),
-                i32::from(src[i + 1]),
-                i32::from(src[i]),
-            )
-        };
-        let (r0, g0, b0) = px(0);
-        let (r1, g1, b1) = px(3);
-        let y = |r: i32, g: i32, b: i32| ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-        let (r, g, b) = (r0.midpoint(r1), g0.midpoint(g1), b0.midpoint(b1));
-        let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-        let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-        let clamp = |x: i32| u8::try_from(x.clamp(0, 255)).unwrap_or(0);
-        *dst = [
-            clamp(y(r0, g0, b0)),
-            clamp(u),
-            clamp(y(r1, g1, b1)),
-            clamp(v),
-        ];
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn converts_reference_colours() {
-        let mut out = [0u8; 4];
-        bgr_to_yuyv(&[0, 0, 0, 0, 0, 0], &mut out);
-        assert_eq!(out, [16, 128, 16, 128]);
-        bgr_to_yuyv(&[255, 255, 255, 255, 255, 255], &mut out);
-        assert_eq!(out, [235, 128, 235, 128]);
-        bgr_to_yuyv(&[0, 255, 0, 0, 255, 0], &mut out);
-        assert_eq!(out, [144, 54, 144, 34]);
-    }
 
     #[test]
     fn struct_sizes_match_the_kernel() {

@@ -271,9 +271,19 @@ fn webcam(camera: &CameraConfig) -> Check {
             "background image {background} does not exist"
         )));
     }
-    let size = format!("{}x{}", camera.width, camera.height);
-    let format = webcam::choose(&camera.input, camera.input_format, &size)?;
-    Ok(format!("{} {format} {size}", camera.input))
+    let format = webcam::choose(
+        &camera.input,
+        camera.input_format,
+        camera.width,
+        camera.height,
+    )?;
+    Ok(format!(
+        "{} {} {}x{}",
+        camera.input,
+        format.label(),
+        camera.width,
+        camera.height
+    ))
 }
 
 #[cfg(test)]

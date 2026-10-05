@@ -3,6 +3,7 @@ mod camera;
 mod config;
 mod doctor;
 mod download;
+mod frames;
 mod gpu;
 mod nvidia;
 mod paths;

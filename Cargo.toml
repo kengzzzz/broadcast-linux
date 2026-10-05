@@ -16,6 +16,7 @@ sevenz-rust2 = "0.23.0"
 sha2 = "0.11.0"
 tar = "0.4.46"
 toml = "1.1.6"
+turbojpeg = { version = "1.5.1", default-features = false, features = ["cmake", "require-simd"] }
 ureq = "3.4.2"
 
 [profile.release]
