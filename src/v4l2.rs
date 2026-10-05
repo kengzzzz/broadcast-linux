@@ -1,9 +1,10 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 const VIDIOC_S_FMT: libc::c_ulong = 0xC0D0_5605;
 const VIDIOC_SUBSCRIBE_EVENT: libc::c_ulong = 0x4020_565A;
@@ -59,7 +60,7 @@ impl Loopback {
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
-            .with_context(|| format!("opening {path} (is v4l2loopback loaded?)"))?;
+            .map_err(|e| anyhow!("opening {path}: {e}{}", open_hint(&e)))?;
         let mut format = Format {
             type_: BUF_TYPE_VIDEO_OUTPUT,
             _align: 0,
@@ -81,10 +82,14 @@ impl Loopback {
         };
         // SAFETY: `format` matches the kernel's struct v4l2_format layout (208 bytes).
         if unsafe { libc::ioctl(file.as_raw_fd(), VIDIOC_S_FMT, &raw mut format) } < 0 {
-            bail!(
-                "setting the output format on {path}: {}",
-                io::Error::last_os_error()
-            );
+            let e = io::Error::last_os_error();
+            if !is_loopback(path) {
+                bail!(
+                    "{path} is not a v4l2loopback device ({e}); {}",
+                    devices_hint()
+                );
+            }
+            bail!("setting the output format on {path}: {e}");
         }
         let mut sub = EventSubscription {
             type_: EVENT_CLIENT_USAGE,
@@ -122,6 +127,67 @@ impl Loopback {
         }
         latest
     }
+}
+
+const VIDEO_CLASS: &str = "/sys/class/video4linux";
+
+fn open_hint(e: &io::Error) -> String {
+    match e.kind() {
+        io::ErrorKind::NotFound => format!("; {}", devices_hint()),
+        io::ErrorKind::PermissionDenied => {
+            "; join the video group (`sudo usermod -aG video $USER`), then log in again".into()
+        }
+        _ => String::new(),
+    }
+}
+
+/// `max_openers` is a sysfs attribute only v4l2loopback devices have.
+fn is_loopback_dir(dir: &Path) -> bool {
+    dir.join("max_openers").exists()
+}
+
+fn is_loopback(path: &str) -> bool {
+    fs::canonicalize(path)
+        .ok()
+        .and_then(|dev| {
+            dev.file_name()
+                .map(|name| Path::new(VIDEO_CLASS).join(name))
+        })
+        .is_some_and(|dir| is_loopback_dir(&dir))
+}
+
+fn devices_hint() -> String {
+    if !Path::new("/sys/module/v4l2loopback").exists() {
+        return "v4l2loopback is not loaded: run `sudo modprobe v4l2loopback`".into();
+    }
+    let mut dirs: Vec<PathBuf> = fs::read_dir(VIDEO_CLASS)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|dir| is_loopback_dir(dir))
+        .collect();
+    if dirs.is_empty() {
+        return "no v4l2loopback devices exist; reload the module to apply its modprobe.d \
+                options: `sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback`"
+            .into();
+    }
+    dirs.sort_by_key(|dir| {
+        dir.file_name()
+            .and_then(|name| name.to_str()?.strip_prefix("video")?.parse::<u32>().ok())
+    });
+    let devices: Vec<String> = dirs
+        .iter()
+        .filter_map(|dir| {
+            let node = dir.file_name()?.to_string_lossy();
+            let label = fs::read_to_string(dir.join("name")).unwrap_or_default();
+            Some(format!("/dev/{node} \"{}\"", label.trim()))
+        })
+        .collect();
+    format!(
+        "set [camera] device to a v4l2loopback device: {}",
+        devices.join(", ")
+    )
 }
 
 /// Converts packed BGR24 to YUYV (BT.601, limited range), two pixels at a time.

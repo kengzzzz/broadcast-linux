@@ -6,20 +6,24 @@ use anyhow::Result;
 use pipewire as pw;
 use pw::loop_::Signal;
 
+use crate::audio::{AudioDevice, Kind, Settings};
 use crate::camera::{self, Camera};
 use crate::config::Config;
-use crate::mic::Mic;
 use crate::paths::Paths;
 
 #[derive(Clone, Copy)]
 pub enum Event {
-    LinkAdded { id: u32, output_node: u32 },
+    LinkAdded {
+        id: u32,
+        output_node: u32,
+        input_node: u32,
+    },
     LinkRemoved(u32),
-    IdleTimeout(u64),
-    UnloadTimeout(u64),
-    MicWorkerReady(u64),
-    MicWorkerExited(u64),
-    MicRestart,
+    IdleTimeout(Kind, u64),
+    UnloadTimeout(Kind, u64),
+    WorkerReady(Kind, u64),
+    WorkerExited(Kind, u64),
+    Restart(Kind),
     Reload,
     Quit,
 }
@@ -29,12 +33,10 @@ pub type EventSender = pw::channel::Sender<Event>;
 struct State {
     paths: Paths,
     config: Config,
-    mic: Option<Mic>,
+    audio: Vec<AudioDevice>,
     camera: Option<Camera>,
     events: EventSender,
     mainloop: pw::main_loop::MainLoopRc,
-    /// Bumped whenever a pending idle timeout should be ignored.
-    idle_token: u64,
 }
 
 pub fn run() -> Result<()> {
@@ -57,14 +59,14 @@ pub fn run() -> Result<()> {
                 if global.type_ != pw::types::ObjectType::Link {
                     return;
                 }
-                let output_node = global
-                    .props
-                    .and_then(|p| p.get("link.output.node"))
-                    .and_then(|v| v.parse().ok());
-                if let Some(output_node) = output_node {
+                let node = |key| global.props?.get(key)?.parse().ok();
+                if let (Some(output_node), Some(input_node)) =
+                    (node("link.output.node"), node("link.input.node"))
+                {
                     let _ = events.send(Event::LinkAdded {
                         id: global.id,
                         output_node,
+                        input_node,
                     });
                 }
             }
@@ -87,11 +89,23 @@ pub fn run() -> Result<()> {
     let _term = signal(Signal::TERM, || Event::Quit);
     let _int = signal(Signal::INT, || Event::Quit);
 
-    let mic = if config.mic.enabled {
-        Some(Mic::new(&core, config.mic.clone(), events.clone())?)
-    } else {
-        None
-    };
+    let mut audio = Vec::new();
+    if config.mic.enabled {
+        let settings = Settings::mic(&config.mic);
+        audio.push(AudioDevice::new(
+            Kind::Mic,
+            &core,
+            settings,
+            events.clone(),
+        )?);
+    }
+    if config.speaker.enabled {
+        let settings = Settings::speaker(&config.speaker);
+        match AudioDevice::new(Kind::Speaker, &core, settings, events.clone()) {
+            Ok(speaker) => audio.push(speaker),
+            Err(e) => eprintln!("speaker: disabled: {e:#}"),
+        }
+    }
     let camera = if config.camera.enabled {
         let idle = Duration::from_secs(config.service.idle_timeout_seconds);
         match Camera::start(Paths::new()?, config.camera.clone(), idle) {
@@ -107,10 +121,12 @@ pub fn run() -> Result<()> {
     let status = |on: bool, device: &str| {
         format!("; {device} {}", if on { "available" } else { "disabled" })
     };
+    let has = |kind| audio.iter().any(|d: &AudioDevice| d.kind() == kind);
     eprintln!(
-        "broadcast-linux running (config {}){}{}",
+        "broadcast-linux running (config {}){}{}{}",
         paths.config.display(),
-        status(mic.is_some(), "mic"),
+        status(has(Kind::Mic), "mic"),
+        status(has(Kind::Speaker), "speaker"),
         status(camera.is_some(), "camera"),
     );
     notify_ready();
@@ -118,11 +134,10 @@ pub fn run() -> Result<()> {
     let state = RefCell::new(State {
         paths,
         config,
-        mic,
+        audio,
         camera,
         events: events.clone(),
         mainloop: mainloop.clone(),
-        idle_token: 0,
     });
     let _receiver = receiver.attach(mainloop.loop_(), move |event| {
         state.borrow_mut().handle(event);
@@ -131,8 +146,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Tells systemd (Type=notify) that the devices exist. Ordered before WirePlumber,
-/// this makes the loopback camera already look like a camera when it is probed.
+/// Tells systemd the devices exist, so WirePlumber (ordered after) probes a live camera.
 fn notify_ready() {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram};
@@ -151,9 +165,8 @@ fn notify_ready() {
     }
 }
 
-/// PipeWire's loop receives signals through a signalfd, which only works if no
-/// thread can take the signal first. Blocking them before any thread exists makes
-/// every later thread (PipeWire's and ours) inherit the block.
+/// PipeWire reads signals via signalfd, so block them before any thread starts;
+/// every later thread inherits the mask.
 fn block_handled_signals() {
     // SAFETY: plain libc calls on a locally owned sigset, before other threads start.
     unsafe {
@@ -166,63 +179,83 @@ fn block_handled_signals() {
     }
 }
 
+fn device(audio: &mut [AudioDevice], kind: Kind) -> Option<&mut AudioDevice> {
+    audio.iter_mut().find(|d| d.kind() == kind)
+}
+
 impl State {
     fn handle(&mut self, event: Event) {
         match event {
-            Event::LinkAdded { id, output_node } => {
-                if self
-                    .mic
-                    .as_mut()
-                    .is_some_and(|m| m.link_added(id, output_node))
-                {
-                    self.readers_changed();
+            Event::LinkAdded {
+                id,
+                output_node,
+                input_node,
+            } => {
+                // A link from the mic into the speaker is a reader of both.
+                let kinds: Vec<Kind> = self
+                    .audio
+                    .iter_mut()
+                    .filter_map(|d| d.link_added(id, output_node, input_node).then(|| d.kind()))
+                    .collect();
+                for kind in kinds {
+                    self.readers_changed(kind);
                 }
             }
             Event::LinkRemoved(id) => {
-                if self.mic.as_mut().is_some_and(|m| m.link_removed(id)) {
-                    self.readers_changed();
+                let kinds: Vec<Kind> = self
+                    .audio
+                    .iter_mut()
+                    .filter_map(|d| d.link_removed(id).then(|| d.kind()))
+                    .collect();
+                for kind in kinds {
+                    self.readers_changed(kind);
                 }
             }
-            Event::IdleTimeout(token) => {
-                if token == self.idle_token
-                    && let Some(mic) = self.mic.as_mut().filter(|m| m.readers() == 0)
-                    && mic.idle()
+            Event::IdleTimeout(kind, token) => {
+                if let Some(d) = device(&mut self.audio, kind)
+                    && d.idle_token() == token
+                    && d.readers() == 0
+                    && d.idle()
                 {
-                    let delay = mic.unload_after();
-                    self.send_after(delay, Event::UnloadTimeout(token));
+                    let delay = d.unload_after();
+                    self.send_after(delay, Event::UnloadTimeout(kind, token));
                 }
             }
-            Event::UnloadTimeout(token) => {
-                if token == self.idle_token
-                    && let Some(mic) = self.mic.as_mut().filter(|m| m.readers() == 0)
-                    && mic.has_session()
+            Event::UnloadTimeout(kind, token) => {
+                if let Some(d) = device(&mut self.audio, kind)
+                    && d.idle_token() == token
+                    && d.readers() == 0
+                    && d.has_session()
                 {
                     eprintln!(
-                        "mic: unloading after {} min unused",
-                        mic.unload_after().as_secs() / 60
+                        "{}: unloading after {} min unused",
+                        kind.label(),
+                        d.unload_after().as_secs() / 60
                     );
-                    mic.stop();
+                    d.stop();
                 }
             }
-            Event::MicWorkerReady(session) => {
-                if let Some(mic) = self.mic.as_mut() {
-                    mic.worker_ready(session);
+            Event::WorkerReady(kind, session) => {
+                if let Some(d) = device(&mut self.audio, kind) {
+                    d.worker_ready(session);
                 }
             }
-            Event::MicWorkerExited(session) => {
-                if let Some(delay) = self.mic.as_mut().and_then(|m| m.worker_exited(session)) {
-                    self.send_after(delay, Event::MicRestart);
+            Event::WorkerExited(kind, session) => {
+                if let Some(delay) =
+                    device(&mut self.audio, kind).and_then(|d| d.worker_exited(session))
+                {
+                    self.send_after(delay, Event::Restart(kind));
                 }
             }
-            Event::MicRestart => {
-                if let Some(mic) = self.mic.as_mut().filter(|m| m.readers() > 0) {
-                    mic.start(&self.paths);
+            Event::Restart(kind) => {
+                if let Some(d) = device(&mut self.audio, kind).filter(|d| d.readers() > 0) {
+                    d.start(&self.paths);
                 }
             }
             Event::Reload => self.reload(),
             Event::Quit => {
-                if let Some(mic) = self.mic.as_mut() {
-                    mic.stop();
+                for d in &mut self.audio {
+                    d.stop();
                 }
                 // Joins the camera thread; it never sends events, so this can't deadlock.
                 drop(self.camera.take());
@@ -231,15 +264,17 @@ impl State {
         }
     }
 
-    fn readers_changed(&mut self) {
-        let Some(mic) = self.mic.as_mut() else { return };
-        self.idle_token += 1;
-        eprintln!("mic: {} app(s) reading", mic.readers());
-        if mic.readers() > 0 {
-            mic.start(&self.paths);
-        } else if mic.has_session() {
-            let timeout = Duration::from_secs(self.config.service.idle_timeout_seconds);
-            self.send_after(timeout, Event::IdleTimeout(self.idle_token));
+    fn readers_changed(&mut self, kind: Kind) {
+        let timeout = Duration::from_secs(self.config.service.idle_timeout_seconds);
+        let Some(d) = device(&mut self.audio, kind) else {
+            return;
+        };
+        let token = d.bump_idle_token();
+        eprintln!("{}: {} app(s) reading", kind.label(), d.readers());
+        if d.readers() > 0 {
+            d.start(&self.paths);
+        } else if d.has_session() {
+            self.send_after(timeout, Event::IdleTimeout(kind, token));
         }
     }
 
@@ -252,12 +287,16 @@ impl State {
             }
         };
         eprintln!("reload: {}", self.paths.config.display());
-        if let Some(mic) = self.mic.as_mut()
-            && mic.set_config(config.mic.clone())
-        {
-            mic.stop();
-            if mic.readers() > 0 {
-                mic.start(&self.paths);
+        for d in &mut self.audio {
+            let settings = match d.kind() {
+                Kind::Mic => Settings::mic(&config.mic),
+                Kind::Speaker => Settings::speaker(&config.speaker),
+            };
+            if d.set_settings(settings) {
+                d.stop();
+                if d.readers() > 0 {
+                    d.start(&self.paths);
+                }
             }
         }
         if let Some(camera) = &self.camera {

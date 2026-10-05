@@ -44,8 +44,7 @@ impl Paths {
     }
 }
 
-/// `$BROADCAST_LINUX_LIBDIR`, else `<prefix>/lib/broadcast-linux` next to the executable's
-/// `<prefix>/bin`, so a package in `/usr` and an unpacked release tarball both work.
+/// `$BROADCAST_LINUX_LIBDIR`, else `../lib/broadcast-linux` beside the binary's `bin/`.
 pub fn lib_dir() -> PathBuf {
     if let Some(dir) = env::var_os("BROADCAST_LINUX_LIBDIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir);

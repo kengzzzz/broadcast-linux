@@ -23,8 +23,7 @@ pub struct Pipes {
     pub stderr: ChildStderr,
 }
 
-/// Owns the worker's process group. Wine's launcher can hand the program off to
-/// another process, so the whole group is killed on stop or drop.
+/// Owns the worker's process group; Wine's launcher may hand off to another process.
 pub struct Worker {
     child: Child,
 }
@@ -80,10 +79,8 @@ impl Worker {
 
 const DISPLAY_VARS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
 
-/// DXVK needs a Vulkan surface, which Wine only provides through a real display
-/// driver (the null driver fails too). At boot the service starts before the desktop
-/// exports its display to the user manager, so the current values are read from the
-/// manager each time a worker starts. Falls back to the service's own environment.
+/// DXVK needs a real display. At boot the service starts before the desktop exports
+/// one, so read it from the user manager per worker, else from our own environment.
 fn session_display() -> Vec<(String, String)> {
     let manager = Command::new("systemctl")
         .args(["--user", "show-environment"])

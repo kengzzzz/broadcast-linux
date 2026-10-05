@@ -47,8 +47,7 @@ pub fn create(prefix: &Path, downloads: &Path, relay: &Path) -> Result<()> {
 
     let system32 = prefix.join("drive_c/windows/system32");
 
-    // Wine only loads the relay's builtin nvcuda from WINEDLLPATH when a matching
-    // placeholder DLL exists in system32.
+    // Wine loads the relay's builtin nvcuda only if a placeholder exists in system32.
     let stub = relay.join("x86_64-windows/nvcuda.dll");
     if !stub.exists() || !relay.join("x86_64-unix/nvcuda.dll.so").exists() {
         bail!(
@@ -64,8 +63,7 @@ pub fn create(prefix: &Path, downloads: &Path, relay: &Path) -> Result<()> {
         install_dlls(&archive, &system32, release.dlls)?;
     }
 
-    // Let the new prefix's background processes finish initialising before the
-    // first worker uses it.
+    // Let the new prefix's background processes settle before the first worker.
     Command::new("wineserver")
         .arg("-w")
         .env("WINEPREFIX", prefix)

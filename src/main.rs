@@ -1,8 +1,8 @@
+mod audio;
 mod camera;
 mod config;
 mod download;
 mod gpu;
-mod mic;
 mod nvidia;
 mod paths;
 mod prefix;

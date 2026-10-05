@@ -32,8 +32,7 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Starts the camera thread and waits until the placeholder is being written, so
-    /// the device already looks like a camera when the session manager probes it.
+    /// Waits for the first placeholder frame, so the device is probed as a camera.
     pub fn start(paths: Paths, config: CameraConfig, idle_timeout: Duration) -> Result<Self> {
         let (commands, receiver) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();

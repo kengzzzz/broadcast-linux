@@ -1,6 +1,6 @@
 # broadcast-linux configuration: ~/.config/broadcast-linux/config.toml
 # Apply: systemctl --user reload broadcast-linux
-# Restart for mic/camera enabled, mic name, camera device/width/height.
+# Restart for mic/speaker/camera enabled, mic/speaker name, camera device/width/height.
 # All enabled fields: true | false. All strength fields: 0.0..1.0.
 # All mic effects off, or all camera effects off with no background: passthrough.
 
@@ -19,6 +19,17 @@ studio_voice = { enabled = false }
 unload_after_minutes = 10
 # Device name shown to apps (any string).
 name = "NVIDIA Broadcast Mic"
+
+[speaker]
+# Mono effects for call audio played to "NVIDIA Broadcast Speaker"; not for music.
+enabled = false
+# "default" | real output node name (`pactl list short sinks`).
+output = "default"
+noise_removal = { enabled = true, strength = 1.0 }
+room_echo_removal = { enabled = false, strength = 1.0 }
+# Same as [mic] unload_after_minutes.
+unload_after_minutes = 10
+name = "NVIDIA Broadcast Speaker"
 
 [camera]
 enabled = true

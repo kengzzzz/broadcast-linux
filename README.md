@@ -3,6 +3,7 @@
 NVIDIA Broadcast effects on Linux, exposed as a virtual mic and camera.
 
 - **Mic:** noise removal, room echo removal, Studio Voice
+- **Speaker** (off by default): noise removal, room echo removal for call audio
 - **Camera:** video noise removal, background replacement/blur/removal, Studio Light
 
 Effects start on demand under Wine. `broadcast-linux setup` downloads NVIDIA's
@@ -52,11 +53,16 @@ cp -n /usr/share/doc/broadcast-linux/config.toml "${XDG_CONFIG_HOME:-$HOME/.conf
 
 Edit the copied config; [all options](https://github.com/kengzzzz/broadcast-linux/blob/main/packaging/config.toml)
 include allowed values and defaults. Apply with `systemctl --user reload broadcast-linux`.
-Restart instead for mic/camera `enabled`, mic `name`, or camera `device`, `width`, `height`.
+Restart instead for mic/speaker/camera `enabled`, mic/speaker `name`, or camera `device`,
+`width`, `height`.
 Choose one background effect: image, blur or removal. Removal fills the background black.
 
 To use Broadcast Mic as the default, set `[mic] input` to your real mic's node name
 (`pactl list short sources`), then run `pactl set-default-source broadcast_linux_mic`.
+
+To clean up what others say in calls, set `[speaker] enabled = true`, restart, and
+select **NVIDIA Broadcast Speaker** as the call app's output. It is mono and tuned
+for speech, so keep music and games on your real output.
 
 ## Building
 
@@ -72,7 +78,9 @@ CI checks and Docker releases.
 
 CI checks code pushes to `main` and pull requests; Markdown/licence-only changes
 skip checks. `v*` tags publish one tarball after checks pass. Keep `Cargo.toml`,
-`Cargo.lock` and both `PKGBUILD` versions aligned with the tag.
+`Cargo.lock` and both `PKGBUILD` versions aligned with the tag, and rename
+`## Unreleased` in [CHANGELOG.md](CHANGELOG.md) to `## <version> - <date>`; its
+section becomes the release notes.
 AUR publishing steps: [packaging/README.md](packaging/README.md).
 
 ## Licence

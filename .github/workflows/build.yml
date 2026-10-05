@@ -45,6 +45,7 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+          ci/release-notes.sh "$version" > /dev/null
       - run: docker build --output type=local,dest=dist .
       - uses: actions/upload-artifact@v4
         with:
@@ -64,6 +65,8 @@ jobs:
         with:
           name: tarball
           path: dist
-      - run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --verify-tag --title "$GITHUB_REF_NAME" --notes-file ci/release-notes.md
+      - run: |
+          ci/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}

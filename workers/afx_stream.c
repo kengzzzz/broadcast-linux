@@ -167,8 +167,7 @@ int main(int argc, char **argv) {
             cur = st->out;
         }
         if (!frames && cushion) {
-            /* output only arrives in whole frames; queue silence ahead of the first one so
-             * the reader keeps a fixed slack that absorbs run-time jitter */
+            /* silence ahead of the first frame gives the reader slack for jitter */
             float *silence = calloc(cushion, sizeof(float));
             fwrite(silence, sizeof(float), cushion, stdout);
             free(silence);

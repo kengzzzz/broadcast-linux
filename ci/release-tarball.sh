@@ -12,7 +12,7 @@ trap 'rm -rf "$(dirname "$stage")"' EXIT
 install -Dm644 -t "$stage/share" "$root/packaging/broadcast-linux.service" \
     "$root/packaging/config.toml" "$root/packaging/modules-load.conf" "$root/packaging/modprobe.conf"
 install -Dm755 "$root/packaging/install.sh" "$stage/install.sh"
-install -Dm644 -t "$stage" "$root/README.md" "$root/LICENSE"
+install -Dm644 -t "$stage" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE"
 install -Dm644 "$root/wine-nvcuda/LICENSE.md" "$stage/LICENSE.nvcuda.md"
 install -Dm644 "$root/vfx-api/LICENSE" "$stage/LICENSE.nvidia-vfx-headers"
 {

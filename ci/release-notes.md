@@ -1,12 +1,11 @@
-Download `broadcast-linux-*-x86_64.tar.gz`, unpack it and run `./install.sh`.
-The same tarball works on Arch and other x86_64 distributions with glibc 2.39+.
+## Install
 
-Built on Debian 13 against WineHQ's stable Wine 11.0; exact build versions are in
-`BUILD-INFO`. Use Wine 11.x. The Debian-built workers and relay were also tested on
-Arch with Wine 11.18 (audio denoising and camera background replacement).
+- **Arch:** `paru -S broadcast-linux-bin`
+- **Other x86_64 distributions (glibc 2.39+):** download
+  `broadcast-linux-*-x86_64.tar.gz`, unpack it and run `./install.sh`.
 
-Requires an NVIDIA RTX GPU with the proprietary driver, PipeWire with WirePlumber,
-ffmpeg, pactl, and v4l2loopback for the camera. Wine is installed separately;
-NVIDIA's files are downloaded by `broadcast-linux setup`.
-
-For an Arch-managed installation, build `packaging/PKGBUILD` with `makepkg -si`.
+Then run `broadcast-linux setup` and see the
+[README](https://github.com/kengzzzz/broadcast-linux#install) for the camera and
+service steps. Requires an NVIDIA RTX GPU with the proprietary driver, Wine 11.x,
+PipeWire with WirePlumber, ffmpeg and pactl, plus v4l2loopback for the camera.
+Build versions are in `BUILD-INFO`.

@@ -99,30 +99,67 @@ impl Default for MicConfig {
 }
 
 impl MicConfig {
-    /// The models to run, in order. Like the Windows app, Studio Voice replaces
-    /// noise and echo removal. Those two together use NVIDIA's combined model, which
-    /// has a single strength (the higher of the two).
     pub fn stages(&self) -> Vec<Stage> {
-        let strength = |effect: Adjustable| effect.enabled.then_some(effect.strength);
-        let stage = |effect, strength| Stage { effect, strength };
-        let mut stages = Vec::new();
-        if self.studio_voice.enabled {
-            stages.push(stage(AudioEffect::StudioVoiceLowLatency, 1.0));
-            return stages;
-        }
-        match (
-            strength(self.noise_removal),
-            strength(self.room_echo_removal),
-        ) {
-            (Some(noise), Some(echo)) => {
-                stages.push(stage(AudioEffect::DereverbDenoiser, noise.max(echo)));
-            }
-            (Some(noise), None) => stages.push(stage(AudioEffect::Denoiser, noise)),
-            (None, Some(echo)) => stages.push(stage(AudioEffect::Dereverb, echo)),
-            (None, None) => {}
-        }
-        stages
+        stages(
+            self.noise_removal,
+            self.room_echo_removal,
+            self.studio_voice.enabled,
+        )
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpeakerConfig {
+    pub enabled: bool,
+    pub output: String,
+    pub noise_removal: Adjustable,
+    pub room_echo_removal: Adjustable,
+    pub unload_after_minutes: u64,
+    pub name: String,
+}
+
+impl Default for SpeakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output: "default".into(),
+            noise_removal: Adjustable::default(),
+            room_echo_removal: Adjustable {
+                enabled: false,
+                ..Adjustable::default()
+            },
+            unload_after_minutes: 10,
+            name: "NVIDIA Broadcast Speaker".into(),
+        }
+    }
+}
+
+impl SpeakerConfig {
+    pub fn stages(&self) -> Vec<Stage> {
+        stages(self.noise_removal, self.room_echo_removal, false)
+    }
+}
+
+/// Studio Voice replaces noise/echo removal, as on Windows. Noise and echo together
+/// use the combined model at the higher strength.
+fn stages(noise: Adjustable, echo: Adjustable, studio_voice: bool) -> Vec<Stage> {
+    let strength = |effect: Adjustable| effect.enabled.then_some(effect.strength);
+    let stage = |effect, strength| Stage { effect, strength };
+    let mut stages = Vec::new();
+    if studio_voice {
+        stages.push(stage(AudioEffect::StudioVoiceLowLatency, 1.0));
+        return stages;
+    }
+    match (strength(noise), strength(echo)) {
+        (Some(noise), Some(echo)) => {
+            stages.push(stage(AudioEffect::DereverbDenoiser, noise.max(echo)));
+        }
+        (Some(noise), None) => stages.push(stage(AudioEffect::Denoiser, noise)),
+        (None, Some(echo)) => stages.push(stage(AudioEffect::Dereverb, echo)),
+        (None, None) => {}
+    }
+    stages
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -266,6 +303,7 @@ impl Default for ServiceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mic: MicConfig,
+    pub speaker: SpeakerConfig,
     pub camera: CameraConfig,
     pub service: ServiceConfig,
 }
@@ -349,6 +387,24 @@ mod tests {
         let config: Config = toml::from_str("[camera]\nvideo_noise_removal = {}").unwrap();
         assert!(config.camera.has_effects());
         assert!(toml::from_str::<Config>("[camera]\nstudio_light = { preset = \"hot\" }").is_err());
+    }
+
+    #[test]
+    fn speaker_is_opt_in() {
+        let config = Config::default();
+        assert!(!config.speaker.enabled);
+        assert_eq!(config.speaker.stages(), config.mic.stages());
+        let config: Config =
+            toml::from_str("[speaker]\nenabled = true\nroom_echo_removal = {}").unwrap();
+        assert!(config.speaker.enabled);
+        assert_eq!(
+            config.speaker.stages(),
+            [Stage {
+                effect: AudioEffect::DereverbDenoiser,
+                strength: 1.0
+            }]
+        );
+        assert!(toml::from_str::<Config>("[speaker]\nstudio_voice = {}").is_err());
     }
 
     #[test]

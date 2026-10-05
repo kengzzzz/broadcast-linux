@@ -6,8 +6,7 @@ use anyhow::{Context, Result, bail};
 
 const SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
 
-/// NVIDIA's installers are 7-Zip self-extractors: a small Windows stub followed by
-/// a plain 7z archive. This reader presents the archive part as if it were a file.
+/// Reads the 7z archive after the Windows stub in NVIDIA's self-extracting installers.
 struct Embedded<R> {
     inner: R,
     base: u64,

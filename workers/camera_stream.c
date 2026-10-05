@@ -344,8 +344,8 @@ int main(int argc, char **argv) {
         if (relight)
             CHECK("Run(Relighting)", run(relight, 1));
         if (light_mask.pixels) {
-            /* SDK's Strength only scales specular highlights; blend the relit person
-             * with the unlit one instead. Transfer only scales when one side is float. */
+            /* Strength only scales highlights, so blend relit and unlit instead.
+             * Transfer only scales when one side is float. */
             CHECK("Scale mask", image_transfer(&mask, &scaled_mask, strength, stream, &tmp));
             CHECK("Convert mask", image_transfer(&scaled_mask, &light_mask, 1.0f, stream, &tmp));
             CHECK("Blend light", composite(&relit, &src_rgb, &light_mask, &relit, stream));

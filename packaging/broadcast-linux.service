@@ -2,17 +2,14 @@
 Description=NVIDIA Broadcast effects as a virtual mic and camera
 Requires=pipewire.service
 After=pipewire.service
-# The loopback camera must already be receiving frames when WirePlumber probes it,
-# or WirePlumber registers it as output-only and apps don't list it.
+# WirePlumber must see frames on the loopback camera, or apps won't list it.
 Before=wireplumber.service
 
 [Service]
 Type=notify
 ExecStart=/usr/bin/broadcast-linux run
 ExecReload=/bin/kill -HUP $MAINPID
-# At boot the service starts before the desktop exports these. Workers read the
-# current values from the user manager instead; unsetting them here makes a
-# mid-session start behave like a boot.
+# Workers read these from the user manager; unsetting makes any start act like boot.
 UnsetEnvironment=DISPLAY WAYLAND_DISPLAY
 Restart=on-failure
 RestartSec=5

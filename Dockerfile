@@ -1,7 +1,6 @@
 # Builds the portable release tarball:
 #   docker build --output type=local,dest=dist .
-# Built on Debian 13 (the binaries need glibc 2.39+); WineHQ's stable Wine 11 is what the
-# nvcuda relay and the workers are built against.
+# Debian 13 for glibc 2.39+; the relay and workers build against WineHQ stable Wine 11.
 FROM debian:13 AS build
 ARG WINE_VERSION=11.0.0.0~trixie-1
 RUN dpkg --add-architecture i386 \
