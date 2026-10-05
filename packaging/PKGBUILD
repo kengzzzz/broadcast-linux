@@ -1,7 +1,7 @@
 # Maintainer: kengzzzz
 
 pkgname=broadcast-linux
-pkgver=0.2.1
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
@@ -43,7 +43,7 @@ package() {
     install -Dm644 packaging/modules-load.conf "$pkgdir/usr/lib/modules-load.d/broadcast-linux.conf"
     install -Dm644 packaging/modprobe.conf "$pkgdir/usr/lib/modprobe.d/broadcast-linux.conf"
     install -Dm644 packaging/config.toml "$pkgdir/usr/share/doc/$pkgname/config.toml"
-    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname/"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 wine-nvcuda/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvcuda.md"
     install -Dm644 vfx-api/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvidia-vfx-headers"

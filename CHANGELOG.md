@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-05
 
-- `broadcast-linux doctor` checks the setup and prints what to fix.
+Virtual speaker, a setup checker, and webcams without MJPEG.
+
 - Virtual speaker (off by default): noise and room echo removal for call audio.
+- `broadcast-linux doctor` checks the setup and prints what to fix.
+- Virtual camera: webcams without MJPEG work; `input_format` defaults to `auto`.
 - Virtual camera: startup errors name the fix (module not loaded, wrong device path, missing `video` group).
-- Release tarball includes this changelog.
+- Release tarball and Arch packages include this changelog.
 
 ## 0.2.1 - 2026-10-02
 
