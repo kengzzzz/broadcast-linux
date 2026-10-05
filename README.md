@@ -13,7 +13,7 @@ runtime and models for your GPU.
 
 - x86_64 Linux (release tarball requires glibc 2.39+)
 - NVIDIA RTX GPU (Turing or newer) with the proprietary driver
-- Wine 11.x, PipeWire and its client library, WirePlumber, `pactl`, ffmpeg (scales the background image)
+- Wine 11.x, PipeWire and its client library, WirePlumber, `pactl`
 - v4l2loopback and membership in the `video` group for the camera
 
 ## Install

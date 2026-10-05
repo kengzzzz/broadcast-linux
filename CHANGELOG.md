@@ -4,6 +4,7 @@
 
 - Virtual camera: much lower CPU usage and slightly lower latency.
 - Virtual camera: damaged webcam frames are skipped instead of shown.
+- ffmpeg is no longer needed.
 - Building from source needs cmake and nasm; CI and release builds updated.
 
 ## 0.3.0 - 2026-10-05

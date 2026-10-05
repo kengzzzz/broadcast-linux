@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdout, Command, Stdio};
+use std::process::{ChildStdout, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -10,6 +10,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use image::imageops::FilterType;
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
 use crate::config::CameraConfig;
 use crate::frames::{Decoder, Layout, SLOTS, SharedFrames};
@@ -550,17 +552,21 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
     };
     if stale {
         fs::create_dir_all(cache.parent().unwrap_or(&paths.data))?;
-        let status = Command::new("ffmpeg")
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
-            .arg(&source)
-            .args(["-vf", &format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}")])
-            .args(["-frames:v", "1", "-pix_fmt", "bgr24", "-f", "rawvideo"])
-            .arg(&cache)
-            .status()
-            .context("running ffmpeg to scale the background")?;
-        if !status.success() {
-            anyhow::bail!("ffmpeg could not read {}", source.display());
-        }
+        let read = || -> image::ImageResult<DynamicImage> {
+            let mut decoder = ImageReader::open(&source)?
+                .with_guessed_format()?
+                .into_decoder()?;
+            let orientation = decoder.orientation()?;
+            let mut image = DynamicImage::from_decoder(decoder)?;
+            image.apply_orientation(orientation);
+            Ok(image)
+        };
+        let image = read().with_context(|| format!("reading {}", source.display()))?;
+        let rgb = image
+            .resize_to_fill(width, height, FilterType::CatmullRom)
+            .into_rgb8();
+        let bgr: Vec<u8> = rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect();
+        fs::write(&cache, bgr)?;
     }
     Ok(cache)
 }
