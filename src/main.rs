@@ -1,6 +1,7 @@
 mod audio;
 mod camera;
 mod config;
+mod doctor;
 mod download;
 mod gpu;
 mod nvidia;
@@ -41,6 +42,8 @@ enum Commands {
     },
     /// Run the service: provide the virtual devices and start effects on demand
     Run,
+    /// Check the setup and print what needs fixing
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -55,5 +58,6 @@ fn main() -> Result<()> {
             keep_installer,
         }),
         Commands::Run => service::run(),
+        Commands::Doctor => doctor::run(),
     }
 }

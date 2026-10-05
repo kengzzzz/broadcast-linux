@@ -82,6 +82,24 @@ const DISPLAY_VARS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
 /// DXVK needs a real display. At boot the service starts before the desktop exports
 /// one, so read it from the user manager per worker, else from our own environment.
 fn session_display() -> Vec<(String, String)> {
+    let vars = manager_display();
+    if !has_display(&vars)
+        && !["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+    {
+        eprintln!("no DISPLAY or WAYLAND_DISPLAY in the session; NVIDIA effects need one to load");
+    }
+    vars
+}
+
+pub(crate) fn has_display(vars: &[(String, String)]) -> bool {
+    vars.iter()
+        .any(|(name, _)| name == "DISPLAY" || name == "WAYLAND_DISPLAY")
+}
+
+/// The display variables the user manager currently exports.
+pub(crate) fn manager_display() -> Vec<(String, String)> {
     let manager = Command::new("systemctl")
         .args(["--user", "show-environment"])
         .stderr(Stdio::null())
@@ -90,21 +108,12 @@ fn session_display() -> Vec<(String, String)> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default();
-    let vars: Vec<(String, String)> = manager
+    manager
         .lines()
         .filter_map(|line| line.split_once('='))
         .filter(|(name, _)| DISPLAY_VARS.contains(name))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
-        .collect();
-    let is_display = |name: &str| name == "DISPLAY" || name == "WAYLAND_DISPLAY";
-    if !vars.iter().any(|(name, _)| is_display(name))
-        && !["DISPLAY", "WAYLAND_DISPLAY"]
-            .iter()
-            .any(|name| std::env::var_os(name).is_some())
-    {
-        eprintln!("no DISPLAY or WAYLAND_DISPLAY in the session; NVIDIA effects need one to load");
-    }
-    vars
+        .collect()
 }
 
 impl Drop for Worker {

@@ -37,7 +37,8 @@ Only the RTX 50 installer has a pinned checksum; older GPUs require
 
 In your app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.
 Mic noise removal is enabled by default; camera effects are off.
-For errors, run `journalctl --user -u broadcast-linux -b`.
+If something doesn't work, run `broadcast-linux doctor`; for logs, run
+`journalctl --user -u broadcast-linux -b`.
 
 To build the package from source, run `cd packaging && makepkg -si`.
 

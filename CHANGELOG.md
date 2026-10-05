@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `broadcast-linux doctor` checks the setup and prints what to fix.
 - Virtual speaker (off by default): noise and room echo removal for call audio.
 - Virtual camera: startup errors name the fix (module not loaded, wrong device path, missing `video` group).
 - Release tarball includes this changelog.

@@ -33,6 +33,7 @@ Next steps:
        modprobe v4l2loopback
        usermod -aG video $USER                # then log in again
   3. systemctl --user enable --now broadcast-linux
+  4. broadcast-linux doctor                   # checks the setup
 MSG
 if [[ :$PATH: != *":$prefix/bin:"* ]]; then
     echo "Note: $prefix/bin is not in your PATH."

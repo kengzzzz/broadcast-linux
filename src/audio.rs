@@ -52,7 +52,7 @@ impl Kind {
         }
     }
 
-    fn node_name(self) -> &'static str {
+    pub(crate) fn node_name(self) -> &'static str {
         match self {
             Self::Mic => "broadcast_linux_mic",
             Self::Speaker => "broadcast_linux_speaker",
@@ -583,7 +583,7 @@ fn chain_name(stages: &[Stage]) -> String {
     }
 }
 
-fn resolve_target(kind: Kind, target: &str) -> Result<String> {
+pub(crate) fn resolve_target(kind: Kind, target: &str) -> Result<String> {
     let (pactl, key, device) = match kind {
         Kind::Mic => ("get-default-source", "input", "microphone"),
         Kind::Speaker => ("get-default-sink", "output", "output device"),

@@ -451,7 +451,7 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
     Ok(cache)
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),

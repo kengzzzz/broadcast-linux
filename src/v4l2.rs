@@ -131,6 +131,30 @@ impl Loopback {
 
 const VIDEO_CLASS: &str = "/sys/class/video4linux";
 
+/// Checks the loopback device without opening it; returns its label.
+pub(crate) fn check(path: &str) -> Result<String> {
+    if !is_loopback(path) {
+        if Path::new(path).exists() {
+            bail!("{path} is not a v4l2loopback device; {}", devices_hint());
+        }
+        bail!("{path} does not exist; {}", devices_hint());
+    }
+    let c_path = std::ffi::CString::new(path)?;
+    // SAFETY: access() only reads the NUL-terminated path.
+    if unsafe { libc::access(c_path.as_ptr(), libc::R_OK | libc::W_OK) } != 0 {
+        let e = io::Error::last_os_error();
+        bail!("{path}: {e}{}", open_hint(&e));
+    }
+    Ok(fs::canonicalize(path)
+        .ok()
+        .and_then(|dev| {
+            fs::read_to_string(Path::new(VIDEO_CLASS).join(dev.file_name()?).join("name")).ok()
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_owned())
+}
+
 fn open_hint(e: &io::Error) -> String {
     match e.kind() {
         io::ErrorKind::NotFound => format!("; {}", devices_hint()),
