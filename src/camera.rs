@@ -13,6 +13,7 @@ use crate::config::CameraConfig;
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
 use crate::v4l2::{self, Loopback};
+use crate::webcam;
 use crate::worker::{Launch, Worker};
 
 /// Placeholder rate while no effect is running; enough to keep the device listed.
@@ -274,9 +275,11 @@ impl CameraLoop {
     }
 
     fn start_session(&self) -> Result<Session> {
+        let format = webcam::choose(&self.config.input, self.config.input_format, &self.size())?;
+        eprintln!("camera: capturing {} as {format}", self.config.input);
         let mut capture = Command::new("ffmpeg")
             .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "v4l2", "-input_format", "mjpeg"])
+            .args(["-f", "v4l2", "-input_format", format])
             .args(["-framerate", &self.config.fps.to_string()])
             .args(["-video_size", &self.size(), "-i", &self.config.input])
             .args(["-pix_fmt", "bgr24", "-f", "rawvideo", "-"])

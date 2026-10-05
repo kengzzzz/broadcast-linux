@@ -219,12 +219,42 @@ impl Default for BackgroundBlur {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputFormat {
+    #[default]
+    Auto,
+    Mjpeg,
+    Yuyv,
+    Nv12,
+}
+
+impl InputFormat {
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Mjpeg => "mjpeg",
+            Self::Yuyv => "yuyv422",
+            Self::Nv12 => "nv12",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "supported",
+            Self::Mjpeg => "MJPEG",
+            Self::Yuyv => "YUYV",
+            Self::Nv12 => "NV12",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {
     pub enabled: bool,
     pub device: String,
     pub input: String,
+    pub input_format: InputFormat,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -267,6 +297,7 @@ impl Default for CameraConfig {
             enabled: true,
             device: "/dev/video10".into(),
             input: "/dev/video0".into(),
+            input_format: InputFormat::Auto,
             width: 1920,
             height: 1080,
             fps: 30,

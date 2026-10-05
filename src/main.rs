@@ -11,6 +11,7 @@ mod service;
 mod setup;
 mod sevenzip;
 mod v4l2;
+mod webcam;
 mod worker;
 
 use anyhow::Result;

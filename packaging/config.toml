@@ -35,8 +35,10 @@ name = "NVIDIA Broadcast Speaker"
 enabled = true
 # v4l2loopback output device path.
 device = "/dev/video10"
-# Real webcam device path; must support MJPEG at the size/rate below.
+# Real webcam device path.
 input = "/dev/video0"
+# "auto" | "mjpeg" | "yuyv" | "nv12". auto prefers MJPEG, then raw, at the size below.
+input_format = "auto"
 # Positive pixel dimensions (width must be even) and frames per second.
 width = 1920
 height = 1080

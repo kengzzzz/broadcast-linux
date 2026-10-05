@@ -8,7 +8,7 @@ use crate::camera::expand_home;
 use crate::config::{CameraConfig, Config};
 use crate::nvidia::Installation;
 use crate::paths::{self, Paths};
-use crate::{gpu, v4l2, worker};
+use crate::{gpu, v4l2, webcam, worker};
 
 enum Problem {
     Warn(String),
@@ -271,61 +271,9 @@ fn webcam(camera: &CameraConfig) -> Check {
             "background image {background} does not exist"
         )));
     }
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-f", "v4l2", "-list_formats", "compressed"])
-        .args(["-i", &camera.input])
-        .output()
-        .context("running ffmpeg (is it installed?)")?;
     let size = format!("{}x{}", camera.width, camera.height);
-    match mjpeg_support(&String::from_utf8_lossy(&out.stderr), &size) {
-        Mjpeg::Yes => Ok(format!("{} MJPEG {size}", camera.input)),
-        Mjpeg::Unknown => Err(Problem::Warn(format!(
-            "{} lists MJPEG sizes as a range; check {size} is supported",
-            camera.input
-        ))),
-        Mjpeg::OtherSizes(sizes) => Err(Problem::Fail(format!(
-            "{} has no MJPEG {size}; set [camera] width/height to one of: {sizes}",
-            camera.input
-        ))),
-        Mjpeg::No(why) => Err(Problem::Fail(format!("{}: {why}", camera.input))),
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum Mjpeg {
-    Yes,
-    Unknown,
-    OtherSizes(String),
-    No(String),
-}
-
-/// Reads `ffmpeg -list_formats compressed` output, which always exits non-zero.
-fn mjpeg_support(stderr: &str, size: &str) -> Mjpeg {
-    if let Some(line) = stderr
-        .lines()
-        .find(|l| l.split_whitespace().any(|w| w == "mjpeg"))
-    {
-        let sizes = line.rsplit(" : ").next().unwrap_or_default().trim();
-        return if sizes.split_whitespace().any(|s| s == size) {
-            Mjpeg::Yes
-        } else if sizes.contains('{') {
-            Mjpeg::Unknown
-        } else {
-            Mjpeg::OtherSizes(sizes.to_owned())
-        };
-    }
-    for (pattern, why) in [
-        ("No such file", "does not exist"),
-        (
-            "Permission denied",
-            "permission denied; join the video group, then log in again",
-        ),
-    ] {
-        if stderr.contains(pattern) {
-            return Mjpeg::No(why.into());
-        }
-    }
-    Mjpeg::No("does not offer MJPEG, which capture needs".into())
+    let format = webcam::choose(&camera.input, camera.input_format, &size)?;
+    Ok(format!("{} {format} {size}", camera.input))
 }
 
 #[cfg(test)]
@@ -344,24 +292,5 @@ mod tests {
     fn parses_mute() {
         assert!(is_muted("Mute: yes\n"));
         assert!(!is_muted("Mute: no"));
-    }
-
-    #[test]
-    fn parses_mjpeg_formats() {
-        let line = "[in#0 @ 0x5605] Compressed:       mjpeg :          Motion-JPEG : 640x480 1280x720 1920x1080\nError opening input file /dev/video0.";
-        assert_eq!(mjpeg_support(line, "1920x1080"), Mjpeg::Yes);
-        assert_eq!(
-            mjpeg_support(line, "1234x567"),
-            Mjpeg::OtherSizes("640x480 1280x720 1920x1080".into())
-        );
-        let stepwise = "[video4linux2,v4l2 @ 0x1] Compressed:       mjpeg :          Motion-JPEG : {32-4096, 2}x{32-2160, 2}";
-        assert_eq!(mjpeg_support(stepwise, "1920x1080"), Mjpeg::Unknown);
-        let raw_only = "[in#0 @ 0x1] Raw       :     yuyv422 :           YUYV 4:2:2 : 640x480";
-        assert!(matches!(mjpeg_support(raw_only, "640x480"), Mjpeg::No(_)));
-        let missing = "Error opening input files: No such file or directory";
-        assert_eq!(
-            mjpeg_support(missing, "640x480"),
-            Mjpeg::No("does not exist".into())
-        );
     }
 }
