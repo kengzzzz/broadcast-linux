@@ -2,9 +2,13 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr::NonNull;
 
+use std::thread;
+
 use anyhow::{Context, Result, bail};
 use turbojpeg::{Decompressor, Subsamp, YuvImage};
 
+use crate::config::ParallelDecode;
+use crate::mjpeg;
 use crate::webcam::Format;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,10 +150,41 @@ pub struct Decoder {
     luma: [u8; 256],
     chroma: [u8; 256],
     warned: bool,
+    workers: Vec<mjpeg::Worker>,
 }
 
 impl Decoder {
-    pub fn new(format: Format, first: &[u8], width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        format: Format,
+        first: &[u8],
+        width: u32,
+        height: u32,
+        fps: u32,
+        parallel: ParallelDecode,
+    ) -> Result<Self> {
+        // Up to 1080p30 one thread decodes in a few milliseconds; splitting the frame
+        // costs more CPU in total, so by default only heavier streams get the threads.
+        let wanted = match parallel {
+            ParallelDecode::On => true,
+            ParallelDecode::Off => false,
+            ParallelDecode::Auto => {
+                u64::from(width) * u64::from(height) * u64::from(fps) > 1920 * 1080 * 30
+            }
+        };
+        let threads = if wanted && format == Format::Mjpeg {
+            thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(8)
+        } else {
+            1
+        };
+        let workers = if threads > 1 {
+            (0..threads)
+                .map(|_| mjpeg::Worker::new())
+                .collect::<turbojpeg::Result<_>>()?
+        } else {
+            Vec::new()
+        };
         let (width, height) = (width as usize, height as usize);
         let mut jpeg = Decompressor::new()?;
         let layout = match format {
@@ -167,6 +202,7 @@ impl Decoder {
             luma,
             chroma,
             warned: false,
+            workers,
         })
     }
 
@@ -247,12 +283,26 @@ impl Decoder {
                 return Ok(false);
             }
         }
+        let subsamp = self.layout.subsamp().unwrap_or(Subsamp::None);
+        if !self.workers.is_empty() {
+            let geometry = mjpeg::Geometry {
+                width: self.width,
+                height: self.height,
+                subsamp,
+            };
+            if let Some(decoded) = mjpeg::decode(frame, geometry, out, &mut self.workers) {
+                if !decoded {
+                    self.warn_once(&anyhow::anyhow!("part of the frame is damaged"));
+                }
+                return Ok(decoded);
+            }
+        }
         let image = YuvImage {
             pixels: out,
             width: self.width,
             align: 1,
             height: self.height,
-            subsamp: self.layout.subsamp().unwrap_or(Subsamp::None),
+            subsamp,
         };
         if let Err(e) = self.jpeg.decompress_to_yuv(frame, image) {
             self.warn_once(&e.into());
@@ -366,6 +416,7 @@ mod tests {
             luma,
             chroma,
             warned: false,
+            workers: Vec::new(),
         }
     }
 

@@ -352,7 +352,14 @@ impl CameraLoop {
         let deadline = Instant::now() + Duration::from_secs(5);
         let decoder = loop {
             if let Some(decoder) = capture.newest(Duration::from_millis(200), |frame| {
-                Decoder::new(format, frame, self.width, self.height)
+                Decoder::new(
+                    format,
+                    frame,
+                    self.width,
+                    self.height,
+                    self.config.fps,
+                    self.config.parallel_decode,
+                )
             })? {
                 break decoder?;
             }

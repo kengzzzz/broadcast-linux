@@ -43,6 +43,9 @@ input_format = "auto"
 width = 1920
 height = 1080
 fps = 30
+# "auto" | "on" | "off": decode MJPEG on several CPU cores. auto: only above 1080p30.
+# on: slightly lower latency at any size, for about a third more decoding CPU.
+parallel_decode = "auto"
 # Low-light noise removal. No strength option.
 video_noise_removal = { enabled = false }
 # Image path (supports ~/), scaled to fill; omit to keep the real background.

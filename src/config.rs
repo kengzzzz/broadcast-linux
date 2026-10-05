@@ -240,6 +240,15 @@ impl InputFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelDecode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {
@@ -250,6 +259,7 @@ pub struct CameraConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub parallel_decode: ParallelDecode,
     /// Broadcast ships only the strong denoising model, so there is no strength.
     pub video_noise_removal: Toggle,
     pub background: Option<String>,
@@ -293,6 +303,7 @@ impl Default for CameraConfig {
             width: 1920,
             height: 1080,
             fps: 30,
+            parallel_decode: ParallelDecode::Auto,
             video_noise_removal: Toggle { enabled: false },
             background: None,
             background_blur: BackgroundBlur {
@@ -470,6 +481,13 @@ mod tests {
         let config: Config = toml::from_str(include_str!("../packaging/config.toml")).unwrap();
         assert_eq!(config, Config::default());
         config.camera.validate().unwrap();
+    }
+
+    #[test]
+    fn parses_parallel_decode() {
+        let config: Config = toml::from_str("[camera]\nparallel_decode = \"on\"\n").unwrap();
+        assert_eq!(config.camera.parallel_decode, ParallelDecode::On);
+        assert!(toml::from_str::<Config>("[camera]\nparallel_decode = true\n").is_err());
     }
 
     #[test]

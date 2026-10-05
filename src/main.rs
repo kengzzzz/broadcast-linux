@@ -5,6 +5,7 @@ mod doctor;
 mod download;
 mod frames;
 mod gpu;
+mod mjpeg;
 mod nvidia;
 mod paths;
 mod prefix;

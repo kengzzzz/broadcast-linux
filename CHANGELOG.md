@@ -4,6 +4,7 @@
 
 - Virtual camera: much lower CPU usage and slightly lower latency.
 - Virtual camera: damaged webcam frames are skipped instead of shown.
+- Virtual camera: webcam streams above 1080p30 decode on several CPU cores; `parallel_decode` turns this on or off.
 - ffmpeg is no longer needed.
 - Building from source needs cmake and nasm; CI and release builds updated.
 
