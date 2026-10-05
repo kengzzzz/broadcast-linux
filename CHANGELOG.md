@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-10-06
+
+Lighter virtual camera, and ffmpeg is no longer needed.
 
 - Virtual camera: much lower CPU usage and slightly lower latency.
 - Virtual camera: damaged webcam frames are skipped instead of shown.
