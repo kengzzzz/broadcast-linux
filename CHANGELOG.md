@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-07
+
+A settings window, plus Eye Contact and Auto Frame for the camera.
 
 - Settings window: open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`. Choose devices and effects, preview the camera, run setup and check the system.
 - Camera: Eye Contact and Auto Frame, off by default. Turn them on in the window, or with `eye_contact` and `auto_frame` in the config.

@@ -1,6 +1,6 @@
 pkgbase = broadcast-linux-bin
 	pkgdesc = NVIDIA Broadcast effects as a virtual mic and camera under Wine
-	pkgver = 0.3.1
+	pkgver = 0.4.0
 	pkgrel = 1
 	url = https://github.com/kengzzzz/broadcast-linux
 	install = broadcast-linux.install
@@ -31,11 +31,11 @@ pkgbase = broadcast-linux-bin
 	optdepends = libxi: the settings window on X11
 	optdepends = libxrender: the settings window on X11
 	optdepends = libxkbcommon-x11: the settings window on X11
-	provides = broadcast-linux=0.3.1
+	provides = broadcast-linux=0.4.0
 	conflicts = broadcast-linux
 	options = !strip
 	options = !debug
-	source = https://github.com/kengzzzz/broadcast-linux/releases/download/v0.3.1/broadcast-linux-0.3.1-x86_64.tar.gz
+	source = https://github.com/kengzzzz/broadcast-linux/releases/download/v0.4.0/broadcast-linux-0.4.0-x86_64.tar.gz
 	sha256sums = 5856af0e8e7b8ff531a008ebe71bfa758071f32924e475ab1af0cde65dfd6916
 
 pkgname = broadcast-linux-bin
