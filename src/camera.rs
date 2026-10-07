@@ -422,6 +422,14 @@ impl CameraLoop {
             let models = install.model_dir("nvbcast_vfx_lld_v0_9")?;
             args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
         }
+        if self.config.eye_contact.enabled {
+            let models = install.model_dir("nvbcast_ar_gw_v0_9")?;
+            args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
+        }
+        if self.config.auto_frame.enabled {
+            let models = install.model_dir("nvbcast_ar_fd_v0_9")?;
+            args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
+        }
         if let Some(background) = &self.config.background {
             let cache = prepare_background(&self.paths, background, self.width, self.height)?;
             args.extend(["--background".into(), cache.display().to_string()]);
@@ -525,6 +533,12 @@ fn effects_name(config: &CameraConfig) -> String {
     let mut names = Vec::new();
     if config.video_noise_removal.enabled {
         names.push("noise removal");
+    }
+    if config.eye_contact.enabled {
+        names.push("Eye Contact");
+    }
+    if config.auto_frame.enabled {
+        names.push("Auto Frame");
     }
     if config.background.is_some() {
         names.push("background replacement");

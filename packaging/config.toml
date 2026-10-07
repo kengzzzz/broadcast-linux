@@ -57,6 +57,10 @@ background_blur = { enabled = false, strength = 0.5 }
 background_removal = { enabled = false }
 # Face relighting. preset: "cooler" | "cool" | "neutral" | "warm" | "warmer".
 studio_light = { enabled = false, strength = 1.0, preset = "neutral" }
+# Redirect your eyes toward the camera while you look at the screen. No strength option.
+eye_contact = { enabled = false }
+# Zoom in and follow your face as you move. No strength option.
+auto_frame = { enabled = false }
 
 [service]
 # Whole seconds after last reader: pause mic / stop camera; 0 = immediately.

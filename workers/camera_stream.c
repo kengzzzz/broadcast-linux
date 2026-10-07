@@ -37,6 +37,32 @@ typedef int (WINAPI *image_transfer_fn)(const NvCVImage *, NvCVImage *, float, C
 typedef int (WINAPI *composite_fn)(const NvCVImage *, const NvCVImage *, const NvCVImage *, NvCVImage *,
                                    CUstream);
 
+/* The few AR SDK (nvAR_defs.h) definitions used here; Broadcast ships the AR runtime in nvARPose.dll. */
+typedef void *NvAR_Handle;
+typedef struct { float x, y, width, height; } NvAR_Rect;
+typedef struct { NvAR_Rect *boxes; uint8_t num_boxes, max_boxes; } NvAR_BBoxes;
+#define AR_CONFIG(name) "NvAR_Parameter_Config_" #name
+#define AR_INPUT(name) "NvAR_Parameter_Input_" #name
+#define AR_OUTPUT(name) "NvAR_Parameter_Output_" #name
+#define MAX_FACES 8
+
+typedef int (WINAPI *ar_create_fn)(const char *, NvAR_Handle *);
+typedef int (WINAPI *ar_destroy_fn)(NvAR_Handle);
+typedef int (WINAPI *ar_load_fn)(NvAR_Handle);
+typedef int (WINAPI *ar_run_fn)(NvAR_Handle);
+typedef int (WINAPI *ar_set_string_fn)(NvAR_Handle, const char *, const char *);
+typedef int (WINAPI *ar_set_u32_fn)(NvAR_Handle, const char *, unsigned);
+typedef int (WINAPI *ar_set_s32_fn)(NvAR_Handle, const char *, int);
+typedef int (WINAPI *ar_set_stream_fn)(NvAR_Handle, const char *, CUstream);
+typedef int (WINAPI *ar_set_object_fn)(NvAR_Handle, const char *, void *, unsigned long);
+
+typedef struct { int width, height; } NppiSize;
+typedef struct { int x, y, width, height; } NppiRect;
+#define NPPI_INTER_CUBIC 4
+typedef int (WINAPI *npp_set_stream_fn)(CUstream);
+typedef int (WINAPI *npp_resize_fn)(const uint8_t *, NppiSize, int, NppiRect, uint8_t *, int, NppiRect, double,
+                                    double, double, double, int);
+
 #define RESOLVE(type, var, dll, name) type var = (type)GetProcAddress(dll, name)
 #define CHECK(name, expr) do { \
     status = (expr); \
@@ -151,6 +177,55 @@ static int pin_host(void *pixels, size_t bytes, int pin) {
     return reg ? reg(pixels, bytes, 0) : -1;
 }
 
+struct framing {
+    float cx, cy, height;
+    float target_cx, target_cy, target_height;
+    ULONGLONG last_face, last_step;
+};
+
+#define FRAME_FACE_SCALE 2.6f     /* crop height per face height */
+#define FRAME_FACE_LEVEL 0.42f    /* face centre, as a fraction down the crop */
+#define FRAME_MAX_ZOOM 2.0f
+#define FRAME_DEADZONE 0.08f      /* fraction of the crop height the face may move before the crop follows */
+#define FRAME_SETTLE_SECONDS 0.35f
+#define FRAME_LOST_MS 2000
+
+/* Picks the largest face and eases the crop toward framing it. The crop only retargets
+ * when the face leaves a dead zone, so small head movements leave the picture still. */
+static void update_framing(struct framing *f, const NvAR_BBoxes *faces, unsigned width, unsigned height) {
+    ULONGLONG now = GetTickCount64();
+    const NvAR_Rect *face = NULL;
+    for (unsigned i = 0; i < faces->num_boxes; i++)
+        if (!face || faces->boxes[i].width * faces->boxes[i].height > face->width * face->height)
+            face = &faces->boxes[i];
+    if (face && face->height > 0) {
+        f->last_face = now;
+        float h = fminf(fmaxf(face->height * FRAME_FACE_SCALE, height / FRAME_MAX_ZOOM), (float)height);
+        float x = face->x + face->width / 2;
+        float y = face->y + face->height / 2 + (0.5f - FRAME_FACE_LEVEL) * h;
+        float limit = FRAME_DEADZONE * f->target_height;
+        if (fabsf(x - f->target_cx) > limit || fabsf(y - f->target_cy) > limit ||
+            fabsf(h - f->target_height) > 2 * limit) {
+            f->target_cx = x;
+            f->target_cy = y;
+            f->target_height = h;
+        }
+    } else if (now - f->last_face > FRAME_LOST_MS) {
+        f->target_cx = width / 2.0f;
+        f->target_cy = height / 2.0f;
+        f->target_height = (float)height;
+    }
+    float dt = f->last_step ? (now - f->last_step) / 1000.0f : 0;
+    f->last_step = now;
+    float k = 1 - expf(-dt / FRAME_SETTLE_SECONDS);
+    f->cx += (f->target_cx - f->cx) * k;
+    f->cy += (f->target_cy - f->cy) * k;
+    f->height += (f->target_height - f->height) * k;
+    float half_h = f->height / 2, half_w = half_h * width / height;
+    f->cx = fminf(fmaxf(f->cx, half_w), width - half_w);
+    f->cy = fminf(fmaxf(f->cy, half_h), height - half_h);
+}
+
 /* Input frame formats: webcam YUV is limited range, decoded MJPEG (jNNN) is full range. */
 static const struct input_format {
     const char *name;
@@ -169,6 +244,7 @@ static void usage(void) {
     fprintf(stderr,
             "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT] [--shm FILE]\n"
             "           [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
+            "           [--eye-contact GAZE_MODEL_DIR] [--auto-frame FACE_MODEL_DIR]\n"
             "           [--background FILE.bgr | --blur 0..1 | --remove-background]\n"
             "           [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
             "           < input > output.yuyv\n"
@@ -181,7 +257,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     const char *gs_dir = NULL, *background_path = NULL, *relight_dir = NULL, *hdr_path = NULL,
-               *denoise_dir = NULL, *shm_path = NULL;
+               *denoise_dir = NULL, *shm_path = NULL, *gaze_dir = NULL, *frame_dir = NULL;
     float strength = 1, denoise_strength = 1;
     float blur_strength = 0.5f;
     int blur_enabled = 0, remove_background = 0;
@@ -205,6 +281,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--strength") && next) strength = (float)atof(argv[++i]);
         else if (!strcmp(a, "--denoise") && next) denoise_dir = argv[++i];
         else if (!strcmp(a, "--denoise-strength") && next) denoise_strength = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--eye-contact") && next) gaze_dir = argv[++i];
+        else if (!strcmp(a, "--auto-frame") && next) frame_dir = argv[++i];
         else if (!strcmp(a, "--size") && next && sscanf(argv[++i], "%ux%u", &width, &height) == 2) {}
         else if (!strcmp(a, "--shm") && next) shm_path = argv[++i];
         else if (!strcmp(a, "--input") && next) {
@@ -269,8 +347,58 @@ int main(int argc, char **argv) {
         fprintf(stderr, "A required VFX export is missing\n");
         return 1;
     }
+    HMODULE ar = NULL, npp = NULL;
+    ar_create_fn ar_create = NULL;
+    ar_destroy_fn ar_destroy = NULL;
+    ar_load_fn ar_load = NULL;
+    ar_run_fn ar_run = NULL;
+    ar_set_string_fn ar_set_string = NULL;
+    ar_set_u32_fn ar_set_u32 = NULL;
+    ar_set_s32_fn ar_set_s32 = NULL;
+    ar_set_stream_fn ar_set_stream = NULL;
+    ar_set_object_fn ar_set_object = NULL;
+    npp_set_stream_fn npp_set_stream = NULL;
+    npp_resize_fn npp_resize = NULL;
+    if (gaze_dir || frame_dir) {
+        ar = LoadLibraryA("nvARPose.dll");
+        if (!ar) {
+            fprintf(stderr, "Could not load nvARPose.dll: %u\n", GetLastError());
+            return 1;
+        }
+        ar_create = (ar_create_fn)GetProcAddress(ar, "NvAR_Create");
+        ar_destroy = (ar_destroy_fn)GetProcAddress(ar, "NvAR_Destroy");
+        ar_load = (ar_load_fn)GetProcAddress(ar, "NvAR_Load");
+        ar_run = (ar_run_fn)GetProcAddress(ar, "NvAR_Run");
+        ar_set_string = (ar_set_string_fn)GetProcAddress(ar, "NvAR_SetString");
+        ar_set_u32 = (ar_set_u32_fn)GetProcAddress(ar, "NvAR_SetU32");
+        ar_set_s32 = (ar_set_s32_fn)GetProcAddress(ar, "NvAR_SetS32");
+        ar_set_stream = (ar_set_stream_fn)GetProcAddress(ar, "NvAR_SetCudaStream");
+        ar_set_object = (ar_set_object_fn)GetProcAddress(ar, "NvAR_SetObject");
+        if (!ar_create || !ar_destroy || !ar_load || !ar_run || !ar_set_string || !ar_set_u32 || !ar_set_s32 ||
+            !ar_set_stream || !ar_set_object) {
+            fprintf(stderr, "A required AR export is missing\n");
+            return 1;
+        }
+    }
+    if (frame_dir) {
+        npp = LoadLibraryA("nppig64_12.dll");
+        HMODULE npp_core = GetModuleHandleA("nppc64_12.dll");
+        if (npp && npp_core) {
+            npp_resize = (npp_resize_fn)GetProcAddress(npp, "nppiResizeSqrPixel_8u_C3R");
+            npp_set_stream = (npp_set_stream_fn)GetProcAddress(npp_core, "nppSetStream");
+        }
+        if (!npp_resize || !npp_set_stream) {
+            fprintf(stderr, "Could not load NPP resize for Auto Frame\n");
+            return 1;
+        }
+    }
 
     NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL, blur = NULL;
+    NvAR_Handle gaze = NULL, faces = NULL;
+    NvAR_Rect face_rects[MAX_FACES] = {{0}};
+    NvAR_BBoxes face_boxes = {face_rects, 0, MAX_FACES};
+    struct framing framing = {width / 2.0f, height / 2.0f, (float)height,
+                              width / 2.0f, height / 2.0f, (float)height, 0, 0};
     NvVFX_StateObjectHandle state = NULL, denoise_state = NULL;
     const size_t frame_bytes = (size_t)width * height * 3, out_bytes = (size_t)width * height * 2,
                  in_bytes = (size_t)width * height * input->bits_per_pixel / 8;
@@ -279,7 +407,7 @@ int main(int argc, char **argv) {
     NvCVImage src_slots[SLOTS] = {{0}}, out_slots[SLOTS] = {{0}};
     NvCVImage src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
               hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0},
-              dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, tmp = {0};
+              dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, gaze_out = {0}, framed = {0}, tmp = {0};
     float *hdr_pixels = NULL;
     uint8_t *shm = MAP_FAILED;
     const size_t shm_bytes = SLOTS * (in_bytes + out_bytes);
@@ -342,6 +470,32 @@ int main(int argc, char **argv) {
         CHECK("AllocateState", alloc_state(denoise, &denoise_state));
         CHECK("Set State", set_states(denoise, "State", &denoise_state));
         CHECK("Load(Denoising)", load(denoise));
+    }
+
+    if (gaze_dir) {
+        CHECK("Alloc eye contact output", image_alloc(&gaze_out, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
+        CHECK("NvAR_Create(GazeRedirection)", ar_create("GazeRedirection", &gaze));
+        CHECK("Set ModelDir", ar_set_string(gaze, AR_CONFIG(ModelDir), gaze_dir));
+        CHECK("Set Stream", ar_set_stream(gaze, AR_CONFIG(CUDAStream), stream));
+        CHECK("Set Temporal", ar_set_u32(gaze, AR_CONFIG(Temporal), 0xffffffff));
+        CHECK("Set GazeRedirect", ar_set_u32(gaze, AR_CONFIG(GazeRedirect), 1));
+        CHECK("NvAR_Load(GazeRedirection)", ar_load(gaze));
+        CHECK("Set Input Image", ar_set_object(gaze, AR_INPUT(Image), &src_gpu, sizeof(NvCVImage)));
+        CHECK("Set Output Image", ar_set_object(gaze, AR_OUTPUT(Image), &gaze_out, sizeof(NvCVImage)));
+        CHECK("Set Input Width", ar_set_s32(gaze, AR_INPUT(Width), (int)width));
+        CHECK("Set Input Height", ar_set_s32(gaze, AR_INPUT(Height), (int)height));
+    }
+
+    if (frame_dir) {
+        CHECK("Alloc framed", image_alloc(&framed, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
+        CHECK("NvAR_Create(FaceBoxDetection)", ar_create("FaceBoxDetection", &faces));
+        CHECK("Set ModelDir", ar_set_string(faces, AR_CONFIG(ModelDir), frame_dir));
+        CHECK("Set Stream", ar_set_stream(faces, AR_CONFIG(CUDAStream), stream));
+        CHECK("Set Temporal", ar_set_u32(faces, AR_CONFIG(Temporal), 0xffffffff));
+        CHECK("NvAR_Load(FaceBoxDetection)", ar_load(faces));
+        CHECK("Set Input Image", ar_set_object(faces, AR_INPUT(Image), &src_gpu, sizeof(NvCVImage)));
+        CHECK("Set BoundingBoxes", ar_set_object(faces, AR_OUTPUT(BoundingBoxes), &face_boxes, sizeof face_boxes));
+        CHECK("Set NPP stream", npp_set_stream(stream));
     }
 
     if (need_mask) {
@@ -422,8 +576,9 @@ int main(int argc, char **argv) {
     }
     const NvCVImage *fg = relight ? &relit : &src_rgb;
     const NvCVImage *bg = background_path || remove_background ? &bg_gpu : &src_rgb;
-    fprintf(stderr, "Camera effects ready (%s%s%s%s%s); reading %ux%u %s frames, writing YUYV\n",
-            denoise ? "noise removal " : "", background_path ? "background " : "",
+    fprintf(stderr, "Camera effects ready (%s%s%s%s%s%s%s); reading %ux%u %s frames, writing YUYV\n",
+            denoise ? "noise removal " : "", gaze ? "Eye Contact " : "", faces ? "Auto Frame " : "",
+            background_path ? "background " : "",
             blur ? "background blur " : "", remove_background ? "background removal " : "",
             relight ? "Studio Light" : "", width, height, input->name);
 
@@ -454,6 +609,26 @@ int main(int argc, char **argv) {
             CHECK("Denoise input", image_transfer(&src_gpu, &dn_in, 1.0f / 255.0f, stream, &tmp));
             CHECK("Run(Denoising)", run(denoise, 0));
             CHECK("Denoise output", image_transfer(&dn_out, &src_gpu, 255.0f, stream, &tmp));
+        }
+        if (gaze) {
+            CHECK("Run(GazeRedirection)", ar_run(gaze));
+            CHECK("Eye contact output", image_transfer(&gaze_out, &src_gpu, 1.0f, stream, &tmp));
+        }
+        if (faces) {
+            face_boxes.num_boxes = 0;
+            CHECK("Run(FaceBoxDetection)", ar_run(faces));
+            update_framing(&framing, &face_boxes, width, height);
+            if (framing.height < height - 0.5f) {
+                const double zoom = height / framing.height;
+                const double left = framing.cx - framing.height * width / height / 2,
+                             top = framing.cy - framing.height / 2;
+                const NppiSize size = {(int)width, (int)height};
+                const NppiRect whole = {0, 0, (int)width, (int)height};
+                CHECK("Resize(AutoFrame)", npp_resize(src_gpu.pixels, size, src_gpu.pitch, whole, framed.pixels,
+                                                      framed.pitch, whole, zoom, zoom, -left * zoom, -top * zoom,
+                                                      NPPI_INTER_CUBIC));
+                CHECK("Auto Frame output", image_transfer(&framed, &src_gpu, 1.0f, stream, &tmp));
+            }
         }
         if (!need_mask) {
             CHECK("Transfer output", image_transfer(&src_gpu, out_cpu, 1.0f, stream, &tmp));
@@ -498,7 +673,8 @@ int main(int argc, char **argv) {
 cleanup:
     {
         NvCVImage *images[] = {&src_gpu, &src_rgb, &mask, &relit, &projected, &hdr, &light_mask, &scaled_mask,
-                               &bg_cpu, &bg_gpu, &out_gpu, &dn_in, &dn_out, &blur_in, &blur_out, &tmp};
+                               &bg_cpu, &bg_gpu, &out_gpu, &dn_in, &dn_out, &blur_in, &blur_out, &gaze_out,
+                               &framed, &tmp};
         for (size_t i = 0; i < sizeof images / sizeof *images; i++)
             if (images[i]->pixels) image_free(images[i]);
         for (int k = 0; k < SLOTS; k++) {
@@ -516,8 +692,12 @@ cleanup:
     if (denoise_state) free_state(denoise, denoise_state);
     if (denoise) destroy(denoise);
     if (blur) destroy(blur);
+    if (gaze) ar_destroy(gaze);
+    if (faces) ar_destroy(faces);
     if (stream) stream_destroy(stream);
     free(hdr_pixels);
+    if (npp) FreeLibrary(npp);
+    if (ar) FreeLibrary(ar);
     FreeLibrary(cv);
     FreeLibrary(vfx);
     return status == 0 ? 0 : 1;

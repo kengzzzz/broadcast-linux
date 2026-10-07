@@ -266,6 +266,8 @@ pub struct CameraConfig {
     pub background_blur: BackgroundBlur,
     pub background_removal: Toggle,
     pub studio_light: StudioLight,
+    pub eye_contact: Toggle,
+    pub auto_frame: Toggle,
 }
 
 impl CameraConfig {
@@ -275,6 +277,8 @@ impl CameraConfig {
             || self.background_blur.enabled
             || self.background_removal.enabled
             || self.studio_light.enabled
+            || self.eye_contact.enabled
+            || self.auto_frame.enabled
     }
 
     fn validate(&self) -> Result<()> {
@@ -315,6 +319,8 @@ impl Default for CameraConfig {
                 enabled: false,
                 ..StudioLight::default()
             },
+            eye_contact: Toggle { enabled: false },
+            auto_frame: Toggle { enabled: false },
         }
     }
 }
@@ -421,6 +427,18 @@ mod tests {
         let config: Config = toml::from_str("[camera]\nvideo_noise_removal = {}").unwrap();
         assert!(config.camera.has_effects());
         assert!(toml::from_str::<Config>("[camera]\nstudio_light = { preset = \"hot\" }").is_err());
+    }
+
+    #[test]
+    fn parses_face_effects() {
+        for effect in ["eye_contact", "auto_frame"] {
+            let config: Config = toml::from_str(&format!("[camera]\n{effect} = {{}}")).unwrap();
+            assert!(config.camera.has_effects(), "{effect}");
+            assert!(
+                toml::from_str::<Config>(&format!("[camera]\n{effect} = {{ strength = 0.5 }}"))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

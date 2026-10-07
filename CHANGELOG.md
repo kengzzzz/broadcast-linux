@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Virtual camera: Eye Contact and Auto Frame (off by default); `eye_contact` and `auto_frame` turn them on.
+
 ## 0.3.1 - 2026-10-06
 
 Lighter virtual camera, and ffmpeg is no longer needed.

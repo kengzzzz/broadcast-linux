@@ -4,7 +4,8 @@ NVIDIA Broadcast effects on Linux, exposed as a virtual mic and camera.
 
 - **Mic:** noise removal, room echo removal, Studio Voice
 - **Speaker** (off by default): noise removal, room echo removal for call audio
-- **Camera:** video noise removal, background replacement/blur/removal, Studio Light
+- **Camera:** video noise removal, background replacement/blur/removal, Studio Light,
+  Eye Contact, Auto Frame
 
 Effects start on demand under Wine. `broadcast-linux setup` downloads NVIDIA's
 runtime and models for your GPU.

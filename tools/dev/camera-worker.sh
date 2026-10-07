@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the camera worker offline on raw BGR24 frames and saves the last YUYV output frame
 # as $OUT/NAME.png. In the worker arguments @DN, @RL and @PRESET:<name> expand to
-# the denoise and relighting model folders and a Studio Light preset file.
+# the denoise and relighting model folders and a Studio Light preset file; @GW and @FD to
+# the Eye Contact and Auto Frame model folders.
 # Usage: SIZE=1920x1080 tools/dev/camera-worker.sh FRAMES.bgr NAME [worker args...]
 #   e.g. ... frames.bgr all --denoise @DN --relight @RL --hdr @PRESET:vkl_mid.hdr
 set -euo pipefail
@@ -13,6 +14,8 @@ for a in "$@"; do
     case $a in
         @DN) a=$(winpath "$(newest nvbcast_vfx_lld_v0_9)") ;;
         @RL) a=$(winpath "$(newest nvbcast_vfx_rl_v0_9)") ;;
+        @GW) a=$(winpath "$(newest nvbcast_ar_gw_v0_9)") ;;
+        @FD) a=$(winpath "$(newest nvbcast_ar_fd_v0_9)") ;;
         @PRESET:*) a="$nvidia/studio_light/${a#@PRESET:}" ;;
     esac
     args+=("$a")
