@@ -26,9 +26,9 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           rustc --version
-          cargo fmt --check
-          cargo clippy --locked --all-targets -- -D warnings -W clippy::pedantic
-          cargo test --locked
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings -W clippy::pedantic
+          cargo test --locked --workspace
 
   tarball:
     if: github.ref_type == 'tag'

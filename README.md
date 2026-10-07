@@ -1,93 +1,72 @@
 # broadcast-linux
 
-NVIDIA Broadcast effects on Linux, exposed as a virtual mic and camera.
+NVIDIA Broadcast effects on Linux, with a native settings window and virtual mic,
+speaker and camera. Effects run through Wine and start when an app uses them.
 
-- **Mic:** noise removal, room echo removal, Studio Voice
-- **Speaker** (off by default): noise removal, room echo removal for call audio
+![Settings window: microphone and camera effects, then the setup checks](docs/demo.gif)
+
+- **Microphone:** noise removal, room echo removal, Studio Voice
+- **Speaker:** noise and room echo removal for incoming call audio
 - **Camera:** video noise removal, background replacement/blur/removal, Studio Light,
   Eye Contact, Auto Frame
 
-Effects start on demand under Wine. `broadcast-linux setup` downloads NVIDIA's
-runtime and models for your GPU.
-
 ## Requirements
 
-- x86_64 Linux (release tarball requires glibc 2.39+)
-- NVIDIA RTX GPU (Turing or newer) with the proprietary driver
-- Wine 11.x, PipeWire and its client library, WirePlumber, `pactl`
-- v4l2loopback and membership in the `video` group for the camera
+### NVIDIA hardware
+
+[NVIDIA's published hardware requirements](https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-app/faq/):
+
+- GeForce RTX 2060, Quadro RTX 3000, TITAN RTX or newer
+- 8 GB RAM or more
+- Recommended CPU: Intel Core i5-8600 or AMD Ryzen 5 2600 or newer
+- Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
+  or higher
+
+### Linux app
+
+- x86_64 Linux with systemd user services. Release binaries require glibc 2.39+.
+- NVIDIA proprietary Linux driver with CUDA and Vulkan support. Bundled DXVK 3.x requires
+  [driver 575.51.02 or newer](https://github.com/doitsujin/dxvk/wiki/Driver-support)
+- Wine 11+, PipeWire and its client library, WirePlumber, PulseAudio compatibility
+  (`pipewire-pulse`) and `pactl`
+- A Wayland or X11 desktop session. The settings window also needs OpenGL.
+- **Camera:** v4l2loopback 0.12.6+ and access to the video devices (usually the `video` group)
+- Internet access and about 8 GB free disk space during setup
 
 ## Install
 
-**Arch (AUR):** `paru -S broadcast-linux-bin` downloads the release without compiling.
-
-**Tarball:** download and unpack the [release tarball](https://github.com/kengzzzz/broadcast-linux/releases)
-(same build for Arch and other distributions), then run `./install.sh`.
-It installs to `~/.local`; ensure `~/.local/bin` is in your `PATH`.
-
-For the camera, complete the package or installer's printed module and group setup
-steps before starting the service, then log in again. Run as your normal user:
+**Arch Linux (AUR):**
 
 ```sh
-broadcast-linux setup
-systemctl --user enable --now broadcast-linux
+paru -S broadcast-linux-bin
 ```
 
-Only the RTX 50 installer has a pinned checksum; older GPUs require
-`broadcast-linux setup --allow-unverified`.
+**Other distributions:** install the requirements above, download and unpack the
+[release tarball](https://github.com/kengzzzz/broadcast-linux/releases), then run
+`./install.sh` inside it. It installs to `~/.local`. Add `~/.local/bin` to your `PATH`.
 
-In your app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.
-Mic noise removal is enabled by default; camera effects are off.
-If something doesn't work, run `broadcast-linux doctor`; for logs, run
-`journalctl --user -u broadcast-linux -b`.
+## Get started
 
-To build the package from source, run `cd packaging && makepkg -si`.
+1. Open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`.
+2. On **Setup**, click **Download and install** and accept NVIDIA's licence.
+   The download is about 2.2–2.4 GB depending on your GPU. Start the service on the same page.
+3. Choose your devices and effects, then **Apply**. For the camera, follow the
+   **Camera** page's module and permission steps. Log in again after joining the video group.
+4. In your call or recording app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.
+   Enable the speaker if needed and select **NVIDIA Broadcast Speaker** as the app's output.
 
-## Configuration
+Mic noise removal is on by default. Speaker processing and camera effects are off.
+The **Setup** page includes diagnostics and service logs.
 
-The AUR package includes `/usr/share/doc/broadcast-linux/config.toml` and this guide.
-To create an editable config without replacing an existing one:
+## Documentation
 
-```sh
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/broadcast-linux"
-cp -n /usr/share/doc/broadcast-linux/config.toml "${XDG_CONFIG_HOME:-$HOME/.config}/broadcast-linux/config.toml"
-```
-
-Edit the copied config; [all options](https://github.com/kengzzzz/broadcast-linux/blob/main/packaging/config.toml)
-include allowed values and defaults. Apply with `systemctl --user reload broadcast-linux`.
-Restart instead for mic/speaker/camera `enabled`, mic/speaker `name`, or camera `device`,
-`width`, `height`.
-Choose one background effect: image, blur or removal. Removal fills the background black.
-
-To use Broadcast Mic as the default, set `[mic] input` to your real mic's node name
-(`pactl list short sources`), then run `pactl set-default-source broadcast_linux_mic`.
-
-To clean up what others say in calls, set `[speaker] enabled = true`, restart, and
-select **NVIDIA Broadcast Speaker** as the call app's output. It is mono and tuned
-for speech, so keep music and games on your real output.
-
-## Building
-
-```sh
-git submodule update --init
-./build.sh                                    # build/stage
-docker build --output type=local,dest=dist .   # release tarball
-```
-
-Local build: Rust via rustup, Wine 11 (`winegcc` and headers), PipeWire headers,
-clang, pkg-config, meson, ninja, cmake, nasm. `rust-toolchain.toml` pins Rust for local builds,
-CI checks and Docker releases.
-
-CI checks code pushes to `main` and pull requests; Markdown/licence-only changes
-skip checks. `v*` tags publish one tarball after checks pass. Keep `Cargo.toml`,
-`Cargo.lock` and both `PKGBUILD` versions aligned with the tag, and rename
-`## Unreleased` in [CHANGELOG.md](CHANGELOG.md) to `## <version> - <date>`; its
-section becomes the release notes.
-AUR publishing steps: [packaging/README.md](packaging/README.md).
+- [Configuration](docs/configuration.md): manual settings, device routing and applying changes
+- [CLI usage](docs/cli.md): setup and service management from the terminal
+- [Building](docs/building.md): source builds, release tarballs and maintainer steps
 
 ## Licence
 
-MIT. Bundled [nvcuda](https://github.com/SveSop/nvcuda) relay: LGPL-2.1-or-later.
-Statically linked [libjpeg-turbo](https://libjpeg-turbo.org): IJG and BSD-3-Clause
-([licence](packaging/LICENSE.libjpeg-turbo)).
-NVIDIA files are downloaded under NVIDIA's licence, accepted during `setup`.
+[MIT](LICENSE). Bundled [nvcuda](https://github.com/SveSop/nvcuda) relay: LGPL-2.1-or-later.
+Statically linked libjpeg-turbo: [IJG and BSD-3-Clause](packaging/LICENSE.libjpeg-turbo).
+The settings window includes [fonts under their own licences](packaging/LICENSE.fonts).
+NVIDIA files are downloaded under NVIDIA's licence, accepted during setup.

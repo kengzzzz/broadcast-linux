@@ -1,7 +1,8 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use crate::config::InputFormat;
 use crate::v4l2::{self, PixFormat};
 
 const VIDIOC_QUERYCAP: libc::c_ulong = 0x8068_5600;
+const VIDIOC_G_FMT: libc::c_ulong = 0xC0D0_5604;
 const VIDIOC_ENUM_FMT: libc::c_ulong = 0xC040_5602;
 const VIDIOC_ENUM_FRAMESIZES: libc::c_ulong = 0xC02C_564A;
 const VIDIOC_S_PARM: libc::c_ulong = 0xC0CC_5616;
@@ -269,6 +271,75 @@ fn list_sizes(file: &File, fourcc: u32) -> Sizes {
         sizes.push((size.size[0], size.size[1]));
     }
     Sizes::Discrete(sizes)
+}
+
+pub struct Webcam {
+    pub path: String,
+    pub name: String,
+    /// In any supported format, largest first.
+    pub sizes: Vec<(u32, u32)>,
+}
+
+/// Sizes offered when a webcam reports a range instead of a list.
+const COMMON_SIZES: [(u32, u32); 6] = [
+    (3840, 2160),
+    (2560, 1440),
+    (1920, 1080),
+    (1280, 720),
+    (960, 540),
+    (640, 480),
+];
+
+/// Skips v4l2loopback devices and webcams without a supported format.
+pub fn list() -> Vec<Webcam> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(v4l2::VIDEO_CLASS)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|dir| !v4l2::is_loopback_dir(dir))
+        .collect();
+    dirs.sort_by_key(|dir| {
+        dir.file_name()
+            .and_then(|name| name.to_str()?.strip_prefix("video")?.parse::<u32>().ok())
+    });
+    dirs.iter()
+        .filter_map(|dir| {
+            let path = format!("/dev/{}", dir.file_name()?.to_str()?);
+            let formats = list_formats(&open(&path).ok()?);
+            let mut sizes: Vec<(u32, u32)> = formats
+                .iter()
+                .flat_map(|(_, sizes)| match sizes {
+                    Sizes::Discrete(list) => list.clone(),
+                    Sizes::Range(_) => COMMON_SIZES
+                        .into_iter()
+                        .filter(|&(w, h)| sizes.fits(w, h))
+                        .collect(),
+                })
+                .collect();
+            if sizes.is_empty() {
+                return None;
+            }
+            sizes.sort_by_key(|&(w, h)| std::cmp::Reverse(u64::from(w) * u64::from(h)));
+            sizes.dedup();
+            let name = fs::read_to_string(dir.join("name")).unwrap_or_default();
+            Some(Webcam {
+                path,
+                name: name.trim().to_owned(),
+                sizes,
+            })
+        })
+        .collect()
+}
+
+/// Lets a reader open the loopback at the size the service writes.
+pub fn capture_size(path: &str) -> Result<(u32, u32)> {
+    let file = open(path)?;
+    // SAFETY: v4l2_pix_format is plain integers; all-zero is a valid value.
+    let mut format = v4l2::Format::new(BUF_TYPE_VIDEO_CAPTURE, unsafe { std::mem::zeroed() });
+    ioctl(&file, VIDIOC_G_FMT, &mut format)
+        .with_context(|| format!("reading the format of {path}"))?;
+    Ok((format.pix.width, format.pix.height))
 }
 
 /// Picks the capture format for the webcam at `width`x`height`.

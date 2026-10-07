@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::fs;
 use std::process::Command;
 
@@ -8,48 +9,150 @@ use crate::camera::expand_home;
 use crate::config::{CameraConfig, Config};
 use crate::nvidia::Installation;
 use crate::paths::{self, Paths};
-use crate::{gpu, v4l2, webcam, worker};
+use crate::{gpu, prefix, setup, v4l2, webcam, worker};
 
-enum Problem {
-    Warn(String),
-    Fail(String),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Ok,
+    Warn,
+    Fail,
+    Skip,
+}
+
+impl Status {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Fail => "FAIL",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+pub struct Item {
+    pub name: &'static str,
+    pub status: Status,
+    pub detail: String,
+    /// Shell commands that fix this, in order.
+    pub fix: Vec<String>,
+}
+
+pub struct Report {
+    pub version: String,
+    pub items: Vec<Item>,
+}
+
+impl Report {
+    pub fn failed(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| i.status == Status::Fail)
+            .count()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Item> {
+        self.items.iter().find(|i| i.name == name)
+    }
+}
+
+struct Problem {
+    status: Status,
+    detail: String,
+    fix: Vec<String>,
+}
+
+impl Problem {
+    fn warn(detail: impl Into<String>, fix: &[&str]) -> Self {
+        Self {
+            status: Status::Warn,
+            detail: detail.into(),
+            fix: fix.iter().map(|c| (*c).to_owned()).collect(),
+        }
+    }
+
+    fn fail(detail: impl Into<String>) -> Self {
+        Self {
+            status: Status::Fail,
+            detail: detail.into(),
+            fix: Vec::new(),
+        }
+    }
 }
 
 impl From<anyhow::Error> for Problem {
     fn from(e: anyhow::Error) -> Self {
-        Self::Fail(format!("{e:#}"))
+        Self::fail(format!("{e:#}"))
+    }
+}
+
+impl From<v4l2::Hint> for Problem {
+    fn from(hint: v4l2::Hint) -> Self {
+        Self {
+            status: Status::Fail,
+            detail: hint.text,
+            fix: hint.commands,
+        }
     }
 }
 
 type Check = Result<String, Problem>;
 
 pub fn run() -> Result<()> {
-    let paths = Paths::new()?;
+    let report = check(&Paths::new()?);
+    println!("{}", report.version);
+    for item in &report.items {
+        let indent = format!("\n{:22}", "");
+        let mut detail = item.detail.trim_end().replace('\n', &indent);
+        for command in &item.fix {
+            let _ = write!(detail, "{indent}$ {command}");
+        }
+        println!("{:<5} {:<15} {detail}", item.status.label(), item.name);
+    }
+    let failed = report.failed();
+    if failed > 0 {
+        bail!("{failed} check(s) failed");
+    }
+    Ok(())
+}
+
+pub fn check(paths: &Paths) -> Report {
     let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
-    println!(
+    let version = format!(
         "broadcast-linux {} (kernel {})",
         env!("CARGO_PKG_VERSION"),
         kernel.trim()
     );
-    let mut failed = 0;
-    let mut report = |name: &str, check: Check| {
-        let (status, detail) = match check {
-            Ok(detail) => ("ok", detail),
-            Err(Problem::Warn(detail)) => ("warn", detail),
-            Err(Problem::Fail(detail)) => {
-                failed += 1;
-                ("FAIL", detail)
-            }
+    let mut items = Vec::new();
+    let mut report = |name: &'static str, check: Check| {
+        let item = match check {
+            Ok(detail) => Item {
+                name,
+                status: Status::Ok,
+                detail,
+                fix: Vec::new(),
+            },
+            Err(p) => Item {
+                name,
+                status: p.status,
+                detail: p.detail,
+                fix: p.fix,
+            },
         };
-        let detail = detail.trim_end().replace('\n', &format!("\n{:22}", ""));
-        println!("{status:<5} {name:<15} {detail}");
+        items.push(item);
     };
-    let skip = |name: &str, why: &str| println!("{:<5} {name:<15} {why}", "skip");
+    let skip = |why: &str| {
+        Err(Problem {
+            status: Status::Skip,
+            detail: why.into(),
+            fix: Vec::new(),
+        })
+    };
 
     report("gpu", gpu_check());
     report("wine", wine());
-    report("nvidia files", nvidia(&paths));
-    report("wine prefix", prefix(&paths));
+    report("nvidia files", nvidia(paths));
+    report("wine prefix", prefix(paths));
     report("workers", workers());
     report("display", display());
     report("pipewire", pipewire());
@@ -60,7 +163,7 @@ pub fn run() -> Result<()> {
     let config = match Config::load(&paths.config) {
         Ok(config) => {
             let source = if paths.config.exists() {
-                paths.config.display().to_string()
+                paths::tilde(&paths.config)
             } else {
                 "defaults (no config file)".into()
             };
@@ -70,9 +173,9 @@ pub fn run() -> Result<()> {
         Err(e) => {
             report("config", Err(e.into()));
             for name in ["mic", "speaker", "virtual camera", "webcam"] {
-                skip(name, "config did not load");
+                report(name, skip("config did not load"));
             }
-            return finish(failed);
+            return Report { version, items };
         }
     };
 
@@ -84,27 +187,21 @@ pub fn run() -> Result<()> {
             &config.speaker.output,
         ),
     ] {
+        let name = kind.label();
         if enabled {
-            report(kind.label(), audio_device(kind, target, running));
+            report(name, audio_device(kind, target, running));
         } else {
-            skip(kind.label(), "disabled in config");
+            report(name, skip("disabled in config"));
         }
     }
     if config.camera.enabled {
         report("virtual camera", loopback(&config.camera));
         report("webcam", webcam(&config.camera));
     } else {
-        skip("virtual camera", "disabled in config");
-        skip("webcam", "disabled in config");
+        report("virtual camera", skip("disabled in config"));
+        report("webcam", skip("disabled in config"));
     }
-    finish(failed)
-}
-
-fn finish(failed: usize) -> Result<()> {
-    if failed > 0 {
-        bail!("{failed} check(s) failed");
-    }
-    Ok(())
+    Report { version, items }
 }
 
 fn output(program: &str, args: &[&str]) -> Result<String> {
@@ -139,7 +236,7 @@ fn wine() -> Check {
     let version = output("wine", &["--version"])?;
     match wine_major(&version) {
         Some(major) if major >= 11 => Ok(version),
-        _ => Err(Problem::Fail(format!(
+        _ => Err(Problem::fail(format!(
             "{version}; Wine 11 or newer is required"
         ))),
     }
@@ -155,24 +252,19 @@ fn wine_major(version: &str) -> Option<u32> {
 }
 
 fn nvidia(paths: &Paths) -> Check {
+    if let Some(problem) = setup::files_problem(paths, gpu::detect()?.generation) {
+        return Err(Problem::fail(problem));
+    }
     let install = Installation::find(paths)?;
-    Ok(install.runtime.display().to_string())
+    Ok(paths::tilde(&install.runtime))
 }
 
 fn prefix(paths: &Paths) -> Check {
     let prefix = paths.prefix();
-    let system32 = prefix.join("drive_c/windows/system32");
-    let missing: Vec<&str> = ["nvcuda.dll", "dxgi.dll", "d3d11.dll", "nvapi64.dll"]
-        .into_iter()
-        .filter(|dll| !system32.join(dll).exists())
-        .collect();
-    if !prefix.join("system.reg").exists() || !missing.is_empty() {
-        return Err(Problem::Fail(format!(
-            "{} is incomplete; run `broadcast-linux setup`",
-            prefix.display()
-        )));
+    match prefix::problem(&prefix) {
+        Some(problem) => Err(Problem::fail(problem)),
+        None => Ok(paths::tilde(&prefix)),
     }
-    Ok(prefix.display().to_string())
 }
 
 fn workers() -> Check {
@@ -182,19 +274,20 @@ fn workers() -> Check {
         paths::relay_dir().join("x86_64-unix/nvcuda.dll.so"),
     ];
     if let Some(missing) = files.iter().find(|f| !f.exists()) {
-        return Err(Problem::Fail(format!(
+        return Err(Problem::fail(format!(
             "{} not found (set BROADCAST_LINUX_LIBDIR)",
-            missing.display()
+            paths::tilde(missing)
         )));
     }
-    Ok(paths::lib_dir().display().to_string())
+    Ok(paths::tilde(&paths::lib_dir()))
 }
 
 fn display() -> Check {
     let vars = worker::manager_display();
     if !worker::has_display(&vars) {
-        return Err(Problem::Warn(
-            "the user manager has no DISPLAY or WAYLAND_DISPLAY; effects load once a desktop session exports one".into(),
+        return Err(Problem::warn(
+            "the user manager has no DISPLAY or WAYLAND_DISPLAY; effects load once a desktop session exports one",
+            &[],
         ));
     }
     let names: Vec<String> = vars.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -209,9 +302,10 @@ fn pipewire() -> Check {
         .unwrap_or("unknown server")
         .to_owned();
     if output("systemctl", &["--user", "is-active", "wireplumber"]).is_err() {
-        return Err(Problem::Warn(format!(
-            "{server}; WirePlumber is not running"
-        )));
+        return Err(Problem::warn(
+            format!("{server}; WirePlumber is not running"),
+            &["systemctl --user enable --now wireplumber"],
+        ));
     }
     Ok(format!("{server}, WirePlumber running"))
 }
@@ -220,7 +314,10 @@ fn service() -> Check {
     output("systemctl", &["--user", "is-active", "broadcast-linux"])
         .map(|_| "running".into())
         .map_err(|_| {
-            Problem::Warn("not running: systemctl --user enable --now broadcast-linux".into())
+            Problem::warn(
+                "not running",
+                &["systemctl --user enable --now broadcast-linux"],
+            )
         })
 }
 
@@ -235,7 +332,7 @@ fn audio_device(kind: Kind, target: &str, running: bool) -> Check {
         .lines()
         .any(|l| l.split('\t').nth(1) == Some(name.as_str()))
     {
-        return Err(Problem::Fail(format!(
+        return Err(Problem::fail(format!(
             "{name} not found; see `pactl list short {list}`"
         )));
     }
@@ -247,9 +344,10 @@ fn audio_device(kind: Kind, target: &str, running: bool) -> Check {
         output("pactl", &[&format!("get-{class}-mute"), node]).is_ok_and(|o| is_muted(&o))
     });
     if let Some(node) = muted.first() {
-        return Err(Problem::Warn(format!(
-            "{node} is muted: pactl set-{class}-mute {node} 0"
-        )));
+        return Err(Problem::warn(
+            format!("{node} is muted"),
+            &[&format!("pactl set-{class}-mute {node} 0")],
+        ));
     }
     Ok(name)
 }
@@ -267,7 +365,7 @@ fn webcam(camera: &CameraConfig) -> Check {
     if let Some(background) = &camera.background
         && !expand_home(background).exists()
     {
-        return Err(Problem::Fail(format!(
+        return Err(Problem::fail(format!(
             "background image {background} does not exist"
         )));
     }

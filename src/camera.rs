@@ -1,22 +1,24 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{ChildStdout, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
+use sha2::{Digest, Sha256};
 
 use crate::config::CameraConfig;
 use crate::frames::{Decoder, Layout, SLOTS, SharedFrames};
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
+use crate::status::{self, State};
 use crate::v4l2::Loopback;
 use crate::webcam::{self, Capture};
 use crate::worker::{Launch, Worker};
@@ -35,13 +37,27 @@ pub enum Control {
 pub struct Camera {
     commands: Sender<Control>,
     thread: Option<JoinHandle<()>>,
+    status: Arc<Mutex<status::Device>>,
 }
+
+type Notify = Box<dyn Fn() + Send>;
 
 impl Camera {
     /// Waits for the first placeholder frame, so the device is probed as a camera.
-    pub fn start(paths: Paths, config: CameraConfig, idle_timeout: Duration) -> Result<Self> {
+    /// `notify` runs on the camera thread whenever `status` changes.
+    pub fn start(
+        paths: Paths,
+        config: CameraConfig,
+        idle_timeout: Duration,
+        notify: Notify,
+    ) -> Result<Self> {
         let (commands, receiver) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let status = Arc::new(Mutex::new(status::Device {
+            state: State::Idle,
+            ..status::Device::default()
+        }));
+        let shared = Arc::clone(&status);
         let thread = thread::spawn(move || {
             let loopback = match Loopback::open(&config.device, config.width, config.height) {
                 Ok(loopback) => loopback,
@@ -51,6 +67,8 @@ impl Camera {
                 }
             };
             let mut camera = CameraLoop::new(paths, config, idle_timeout, loopback, receiver);
+            camera.status = shared;
+            camera.notify = notify;
             if let Err(e) = camera.loopback.write_frame(&camera.placeholder) {
                 eprintln!("camera: writing the first placeholder frame: {e}");
             }
@@ -61,11 +79,16 @@ impl Camera {
         Ok(Self {
             commands,
             thread: Some(thread),
+            status,
         })
     }
 
     pub fn send(&self, command: Control) {
         let _ = self.commands.send(command);
+    }
+
+    pub fn status(&self) -> status::Device {
+        self.status.lock().unwrap().clone()
     }
 }
 
@@ -175,6 +198,11 @@ struct CameraLoop {
     retry_at: Option<Instant>,
     failures: u32,
     placeholder: Vec<u8>,
+    error: Option<String>,
+    /// Usually the reason when the worker exits.
+    worker_line: Arc<Mutex<String>>,
+    status: Arc<Mutex<status::Device>>,
+    notify: Notify,
 }
 
 impl CameraLoop {
@@ -201,6 +229,10 @@ impl CameraLoop {
             retry_at: None,
             failures: 0,
             placeholder: [16u8, 128].repeat(frame / 2),
+            error: None,
+            worker_line: Arc::default(),
+            status: Arc::default(),
+            notify: Box::new(|| {}),
         }
     }
 
@@ -235,8 +267,33 @@ impl CameraLoop {
             }
             self.pump_frames();
             self.check_timers();
+            self.publish();
         }
         self.stop();
+    }
+
+    fn publish(&self) {
+        let state = match &self.session {
+            None => State::Idle,
+            Some(s) if !s.live => State::Loading,
+            Some(_) => State::Running,
+        };
+        let device = status::Device {
+            state,
+            readers: usize::from(self.in_use),
+            error: self.error.clone(),
+        };
+        let mut status = self.status.lock().unwrap();
+        if *status != device {
+            *status = device;
+            drop(status);
+            (self.notify)();
+        }
+    }
+
+    fn fail(&mut self, message: String) {
+        eprintln!("camera: {message}");
+        self.error = Some(message);
     }
 
     fn poll(&self, wait: Duration) {
@@ -300,9 +357,14 @@ impl CameraLoop {
         if (config.width, config.height) != (self.width, self.height) {
             eprintln!("camera: the resolution only changes after the service restarts");
         }
-        let changed = config != self.config;
+        if config == self.config {
+            return;
+        }
         self.config = config;
-        if changed && self.session.is_some() {
+        // New settings get fresh retries, even after the last ones gave up.
+        self.failures = 0;
+        self.retry_at = None;
+        if self.session.is_some() || self.in_use {
             self.stop();
             self.start();
         }
@@ -322,7 +384,7 @@ impl CameraLoop {
                 self.session = Some(session);
             }
             Err(e) => {
-                eprintln!("camera: could not start: {e:#}");
+                self.fail(format!("could not start: {e:#}"));
                 self.schedule_retry();
             }
         }
@@ -337,7 +399,8 @@ impl CameraLoop {
     fn schedule_retry(&mut self) {
         self.failures += 1;
         if self.failures > 3 {
-            eprintln!("camera: giving up until the next use");
+            let reason = self.error.take().unwrap_or_default();
+            self.fail(format!("{reason}; giving up until the next use"));
             return;
         }
         self.retry_at = Some(Instant::now() + Duration::from_secs(1 << self.failures));
@@ -408,7 +471,7 @@ impl CameraLoop {
         frames: &str,
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
-        let models = install.model_dir("nvbcast_vfx_gs_v0_9")?;
+        let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
         let mut args = vec![
             nvidia::windows_path(&models),
             "--size".into(),
@@ -419,15 +482,15 @@ impl CameraLoop {
             frames.into(),
         ];
         if self.config.video_noise_removal.enabled {
-            let models = install.model_dir("nvbcast_vfx_lld_v0_9")?;
+            let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
             args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
         }
         if self.config.eye_contact.enabled {
-            let models = install.model_dir("nvbcast_ar_gw_v0_9")?;
+            let models = install.model_dir(nvidia::EYE_CONTACT_MODELS)?;
             args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
         }
         if self.config.auto_frame.enabled {
-            let models = install.model_dir("nvbcast_ar_fd_v0_9")?;
+            let models = install.model_dir(nvidia::FACE_DETECTION_MODELS)?;
             args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
         }
         if let Some(background) = &self.config.background {
@@ -445,7 +508,7 @@ impl CameraLoop {
         }
         let light = self.config.studio_light;
         if light.enabled {
-            let models = install.model_dir("nvbcast_vfx_rl_v0_9")?;
+            let models = install.model_dir(nvidia::STUDIO_LIGHT_MODELS)?;
             args.extend([
                 "--relight".into(),
                 nvidia::windows_path(&models),
@@ -467,9 +530,12 @@ impl CameraLoop {
             args,
             stdin: Some(tokens),
         })?;
+        let last = Arc::clone(&self.worker_line);
+        last.lock().unwrap().clear();
         thread::spawn(move || {
             for line in BufReader::new(pipes.stderr).lines().map_while(Result::ok) {
                 eprintln!("camera worker: {line}");
+                line.clone_into(&mut last.lock().unwrap());
             }
         });
         Ok((worker, pipes.stdout))
@@ -487,7 +553,12 @@ impl CameraLoop {
         loop {
             match session.tokens.read(&mut tokens) {
                 Ok(0) => {
-                    eprintln!("camera: worker exited");
+                    let line = self.worker_line.lock().unwrap().clone();
+                    self.fail(if line.is_empty() {
+                        "the worker exited".into()
+                    } else {
+                        format!("the worker exited: {line}")
+                    });
                     self.stop();
                     if self.in_use {
                         self.schedule_retry();
@@ -509,6 +580,7 @@ impl CameraLoop {
                     if !session.live {
                         session.live = true;
                         self.failures = 0;
+                        self.error = None;
                         eprintln!("camera: effect running");
                     }
                     // SAFETY: the token gives this thread slot `newest` until it is sent back.
@@ -561,38 +633,49 @@ fn effects_name(config: &CameraConfig) -> String {
 
 fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Result<PathBuf> {
     let source = expand_home(image);
-    let cache = paths
-        .data
-        .join("camera")
-        .join(format!("background_{width}x{height}.bgr"));
-    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
-    let stale = match (modified(&source), modified(&cache)) {
-        (Some(src), Some(cached)) => src > cached,
-        (Some(_), None) => true,
-        (None, _) => anyhow::bail!("background image {} not found", source.display()),
-    };
-    if stale {
-        fs::create_dir_all(cache.parent().unwrap_or(&paths.data))?;
-        let read = || -> image::ImageResult<DynamicImage> {
-            let mut decoder = ImageReader::open(&source)?
-                .with_guessed_format()?
-                .into_decoder()?;
-            let orientation = decoder.orientation()?;
-            let mut image = DynamicImage::from_decoder(decoder)?;
-            image.apply_orientation(orientation);
-            Ok(image)
-        };
-        let image = read().with_context(|| format!("reading {}", source.display()))?;
-        let rgb = image
-            .resize_to_fill(width, height, FilterType::CatmullRom)
-            .into_rgb8();
-        let bgr: Vec<u8> = rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect();
-        fs::write(&cache, bgr)?;
+    let meta = fs::metadata(&source)
+        .with_context(|| format!("background image {} not found", source.display()))?;
+    // Keyed by the source's identity, so picking another image never reuses this one.
+    let key = format!(
+        "{}\0{:?}\0{}",
+        fs::canonicalize(&source)
+            .unwrap_or_else(|_| source.clone())
+            .display(),
+        meta.modified().ok(),
+        meta.len()
+    );
+    let hash = hex::encode(&Sha256::digest(key.as_bytes())[..8]);
+    let dir = paths.data.join("camera");
+    let cache = dir.join(format!("background_{width}x{height}_{hash}.bgr"));
+    if cache.exists() {
+        return Ok(cache);
     }
+    fs::create_dir_all(&dir)?;
+    for old in fs::read_dir(&dir)?.flatten() {
+        let name = old.file_name();
+        if name.to_string_lossy().starts_with("background_") {
+            let _ = fs::remove_file(old.path());
+        }
+    }
+    let read = || -> image::ImageResult<DynamicImage> {
+        let mut decoder = ImageReader::open(&source)?
+            .with_guessed_format()?
+            .into_decoder()?;
+        let orientation = decoder.orientation()?;
+        let mut image = DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        Ok(image)
+    };
+    let image = read().with_context(|| format!("reading {}", source.display()))?;
+    let rgb = image
+        .resize_to_fill(width, height, FilterType::CatmullRom)
+        .into_rgb8();
+    let bgr: Vec<u8> = rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect();
+    fs::write(&cache, bgr)?;
     Ok(cache)
 }
 
-pub(crate) fn expand_home(path: &str) -> PathBuf {
+pub fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
@@ -609,4 +692,46 @@ fn set_nonblocking(fd: i32) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+
+    #[test]
+    fn background_cache_follows_the_chosen_image() {
+        let dir = std::env::temp_dir().join(format!("broadcast-linux-bg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let paths = Paths {
+            data: dir.join("data"),
+            config: dir.join("config.toml"),
+        };
+        let image = |name: &str, rgb: [u8; 3], age: u64| {
+            let path = dir.join(name);
+            image::RgbImage::from_pixel(4, 4, image::Rgb(rgb))
+                .save(&path)
+                .unwrap();
+            let when = SystemTime::now() - Duration::from_secs(age);
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+            path.display().to_string()
+        };
+        let red = image("red.png", [255, 0, 0], 10);
+        let blue = image("blue.png", [0, 0, 255], 1000);
+
+        let first = prepare_background(&paths, &red, 2, 2).unwrap();
+        assert_eq!(&fs::read(&first).unwrap()[..3], [0, 0, 255], "BGR of red");
+        let second = prepare_background(&paths, &blue, 2, 2).unwrap();
+        assert_eq!(&fs::read(&second).unwrap()[..3], [255, 0, 0], "BGR of blue");
+        assert!(!first.exists(), "the old cache is removed");
+        assert_eq!(prepare_background(&paths, &blue, 2, 2).unwrap(), second);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

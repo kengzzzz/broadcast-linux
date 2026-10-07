@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioEffect {
@@ -13,6 +13,13 @@ pub enum AudioEffect {
 }
 
 impl AudioEffect {
+    pub const ALL: [Self; 4] = [
+        Self::Denoiser,
+        Self::Dereverb,
+        Self::DereverbDenoiser,
+        Self::StudioVoiceLowLatency,
+    ];
+
     pub fn selector(self) -> &'static str {
         match self {
             Self::Denoiser => "denoiser",
@@ -35,7 +42,7 @@ impl AudioEffect {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Adjustable {
     pub enabled: bool,
@@ -51,7 +58,7 @@ impl Default for Adjustable {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Toggle {
     pub enabled: bool,
@@ -69,7 +76,7 @@ pub struct Stage {
     pub strength: f32,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MicConfig {
     pub enabled: bool,
@@ -108,7 +115,7 @@ impl MicConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpeakerConfig {
     pub enabled: bool,
@@ -162,7 +169,7 @@ fn stages(noise: Adjustable, echo: Adjustable, studio_voice: bool) -> Vec<Stage>
     stages
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LightPreset {
     Cooler,
@@ -174,6 +181,14 @@ pub enum LightPreset {
 }
 
 impl LightPreset {
+    pub const ALL: [Self; 5] = [
+        Self::Cooler,
+        Self::Cool,
+        Self::Neutral,
+        Self::Warm,
+        Self::Warmer,
+    ];
+
     pub fn file(self) -> &'static str {
         match self {
             Self::Cooler => "vkl_cool_02.hdr",
@@ -185,7 +200,7 @@ impl LightPreset {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StudioLight {
     pub enabled: bool,
@@ -203,7 +218,7 @@ impl Default for StudioLight {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BackgroundBlur {
     pub enabled: bool,
@@ -219,7 +234,7 @@ impl Default for BackgroundBlur {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InputFormat {
     #[default]
@@ -240,7 +255,7 @@ impl InputFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParallelDecode {
     #[default]
@@ -249,7 +264,7 @@ pub enum ParallelDecode {
     Off,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {
     pub enabled: bool,
@@ -325,7 +340,7 @@ impl Default for CameraConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
     pub idle_timeout_seconds: u64,
@@ -339,7 +354,7 @@ impl Default for ServiceConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mic: MicConfig,
@@ -354,14 +369,24 @@ impl Config {
             return Ok(Self::default());
         }
         let text = fs::read_to_string(path)?;
-        let config: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        config
-            .camera
-            .validate()
-            .with_context(|| format!("validating {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("loading {}", path.display()))
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        let config: Self = toml::from_str(text)?;
+        config.camera.validate()?;
         Ok(config)
     }
+}
+
+pub fn needs_restart(old: &Config, new: &Config) -> bool {
+    old.mic.enabled != new.mic.enabled
+        || old.speaker.enabled != new.speaker.enabled
+        || old.camera.enabled != new.camera.enabled
+        || old.mic.name != new.mic.name
+        || old.speaker.name != new.speaker.name
+        || old.camera.device != new.camera.device
+        || (old.camera.width, old.camera.height) != (new.camera.width, new.camera.height)
 }
 
 #[cfg(test)]
@@ -506,6 +531,20 @@ mod tests {
         let config: Config = toml::from_str("[camera]\nparallel_decode = \"on\"\n").unwrap();
         assert_eq!(config.camera.parallel_decode, ParallelDecode::On);
         assert!(toml::from_str::<Config>("[camera]\nparallel_decode = true\n").is_err());
+    }
+
+    #[test]
+    fn restart_only_fields() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.mic.noise_removal.strength = 0.5;
+        new.camera.background_blur.enabled = true;
+        assert!(!needs_restart(&old, &new));
+        new.camera.width = 1280;
+        assert!(needs_restart(&old, &new));
+        let mut new = old.clone();
+        new.speaker.enabled = true;
+        assert!(needs_restart(&old, &new));
     }
 
     #[test]

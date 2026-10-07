@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -53,6 +53,28 @@ pub fn lib_dir() -> PathBuf {
         .ok()
         .and_then(|exe| Some(exe.parent()?.parent()?.join("lib").join(APP)))
         .unwrap_or_else(|| PathBuf::from("/usr/lib").join(APP))
+}
+
+/// `path` with the home directory shortened to `~`, for messages.
+pub fn tilde(path: &Path) -> String {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+/// `share/broadcast-linux` beside `lib/broadcast-linux`: the module config files.
+pub fn share_dir() -> PathBuf {
+    lib_dir()
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(|| PathBuf::from("/usr/share"), Path::to_path_buf)
+        .join("share")
+        .join(APP)
 }
 
 pub fn relay_dir() -> PathBuf {

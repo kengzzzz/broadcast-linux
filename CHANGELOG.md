@@ -2,7 +2,21 @@
 
 ## Unreleased
 
-- Virtual camera: Eye Contact and Auto Frame (off by default); `eye_contact` and `auto_frame` turn them on.
+- Settings window: open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`. Choose devices and effects, preview the camera, run setup and check the system.
+- Camera: Eye Contact and Auto Frame, off by default. Turn them on in the window, or with `eye_contact` and `auto_frame` in the config.
+- Camera: apps that keep the camera open during a service restart get the effects back.
+- Camera: a new background image always replaces the previous one.
+- Camera: fixing the webcam settings after a failed start works without reopening the app.
+- Camera: changing the resolution while an app uses the camera shows a clear error instead of a garbled picture.
+- Service: a second copy refuses to start instead of creating duplicate devices.
+- Setup: every GPU's installer is checked against a pinned checksum. `--allow-unverified` is no longer needed.
+- Setup: checks free disk space before downloading.
+- Setup: finds missing or damaged NVIDIA files and installs them again.
+- Setup: running it again no longer waits for effects in use to stop.
+- `broadcast-linux doctor` prints fix commands on their own lines, including module setup for tarball installs, and shows paths in your home as `~`.
+- Tarball: `install.sh` also installs the app menu entry, its icon and the module config files.
+- Packages now require `pipewire-pulse`.
+- Docs: configuration, CLI and build guides are in `docs/`.
 
 ## 0.3.1 - 2026-10-06
 

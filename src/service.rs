@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -8,8 +9,9 @@ use pw::loop_::Signal;
 
 use crate::audio::{AudioDevice, Kind, Settings};
 use crate::camera::{self, Camera};
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::paths::Paths;
+use crate::status;
 
 #[derive(Clone, Copy)]
 pub enum Event {
@@ -25,6 +27,7 @@ pub enum Event {
     WorkerExited(Kind, u64),
     Restart(Kind),
     Reload,
+    StatusChanged,
     Quit,
 }
 
@@ -33,6 +36,13 @@ pub type EventSender = pw::channel::Sender<Event>;
 struct State {
     paths: Paths,
     config: Config,
+    /// The config the service started with; restart-only fields keep these values.
+    started: Config,
+    status: Option<status::Server>,
+    reloads: u64,
+    reload_error: Option<String>,
+    speaker_error: Option<String>,
+    camera_error: Option<String>,
     audio: Vec<AudioDevice>,
     camera: Option<Camera>,
     events: EventSender,
@@ -89,34 +99,12 @@ pub fn run() -> Result<()> {
     let _term = signal(Signal::TERM, || Event::Quit);
     let _int = signal(Signal::INT, || Event::Quit);
 
-    let mut audio = Vec::new();
-    if config.mic.enabled {
-        let settings = Settings::mic(&config.mic);
-        audio.push(AudioDevice::new(
-            Kind::Mic,
-            &core,
-            settings,
-            events.clone(),
-        )?);
-    }
-    if config.speaker.enabled {
-        let settings = Settings::speaker(&config.speaker);
-        match AudioDevice::new(Kind::Speaker, &core, settings, events.clone()) {
-            Ok(speaker) => audio.push(speaker),
-            Err(e) => eprintln!("speaker: disabled: {e:#}"),
-        }
-    }
-    let camera = if config.camera.enabled {
-        let idle = Duration::from_secs(config.service.idle_timeout_seconds);
-        match Camera::start(Paths::new()?, config.camera.clone(), idle) {
-            Ok(camera) => Some(camera),
-            Err(e) => {
-                eprintln!("camera: disabled: {e:#}");
-                None
-            }
-        }
+    let server = start_status(&events)?;
+    let (audio, speaker_error) = start_audio(&config, &core, &events)?;
+    let (camera, camera_error) = if config.camera.enabled {
+        start_camera(&config, &events)?
     } else {
-        None
+        (None, None)
     };
     let status = |on: bool, device: &str| {
         format!("; {device} {}", if on { "available" } else { "disabled" })
@@ -133,17 +121,89 @@ pub fn run() -> Result<()> {
 
     let state = RefCell::new(State {
         paths,
+        started: config.clone(),
         config,
+        status: server,
+        reloads: 0,
+        reload_error: None,
+        speaker_error,
+        camera_error,
         audio,
         camera,
         events: events.clone(),
         mainloop: mainloop.clone(),
     });
-    let _receiver = receiver.attach(mainloop.loop_(), move |event| {
-        state.borrow_mut().handle(event);
+    state.borrow_mut().publish();
+    let attached = receiver.attach(mainloop.loop_(), move |event| {
+        let mut state = state.borrow_mut();
+        state.handle(event);
+        state.publish();
     });
     mainloop.run();
+    // Dropping the state joins the camera thread. The channel stays locked while the
+    // callback runs, so joining there would deadlock with a camera status notification.
+    drop(attached);
     Ok(())
+}
+
+/// The mic is required; a speaker failure is returned instead.
+fn start_audio(
+    config: &Config,
+    core: &pw::core::CoreRc,
+    events: &EventSender,
+) -> Result<(Vec<AudioDevice>, Option<String>)> {
+    let mut audio = Vec::new();
+    let mut speaker_error = None;
+    if config.mic.enabled {
+        let settings = Settings::mic(&config.mic);
+        audio.push(AudioDevice::new(Kind::Mic, core, settings, events.clone())?);
+    }
+    if config.speaker.enabled {
+        let settings = Settings::speaker(&config.speaker);
+        match AudioDevice::new(Kind::Speaker, core, settings, events.clone()) {
+            Ok(speaker) => audio.push(speaker),
+            Err(e) => {
+                eprintln!("speaker: disabled: {e:#}");
+                speaker_error = Some(format!("{e:#}"));
+            }
+        }
+    }
+    Ok((audio, speaker_error))
+}
+
+/// Fails if another service is running: two would create duplicate devices and fight
+/// over the virtual camera. Any other socket problem only disables the status socket.
+fn start_status(events: &EventSender) -> Result<Option<status::Server>> {
+    let events = Mutex::new(events.clone());
+    let reload = move || {
+        let _ = events.lock().unwrap().send(Event::Reload);
+    };
+    match status::Server::start(reload) {
+        Ok(server) => Ok(Some(server)),
+        Err(e) if e.is::<status::AlreadyRunning>() => Err(e),
+        Err(e) => {
+            eprintln!("status socket: disabled: {e:#}");
+            Ok(None)
+        }
+    }
+}
+
+/// A camera failure is returned, not fatal.
+fn start_camera(config: &Config, events: &EventSender) -> Result<(Option<Camera>, Option<String>)> {
+    let idle = Duration::from_secs(config.service.idle_timeout_seconds);
+    let events = Mutex::new(events.clone());
+    let notify = Box::new(move || {
+        let _ = events.lock().unwrap().send(Event::StatusChanged);
+    });
+    Ok(
+        match Camera::start(Paths::new()?, config.camera.clone(), idle, notify) {
+            Ok(camera) => (Some(camera), None),
+            Err(e) => {
+                eprintln!("camera: disabled: {e:#}");
+                (None, Some(format!("{e:#}")))
+            }
+        },
+    )
 }
 
 /// Tells systemd the devices exist, so WirePlumber (ordered after) probes a live camera.
@@ -253,12 +313,12 @@ impl State {
                 }
             }
             Event::Reload => self.reload(),
+            Event::StatusChanged => {}
             Event::Quit => {
+                self.status = None;
                 for d in &mut self.audio {
                     d.stop();
                 }
-                // Joins the camera thread; it never sends events, so this can't deadlock.
-                drop(self.camera.take());
                 self.mainloop.quit();
             }
         }
@@ -283,9 +343,13 @@ impl State {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("reload: keeping the current settings: {e:#}");
+                self.reloads += 1;
+                self.reload_error = Some(format!("{e:#}"));
                 return;
             }
         };
+        self.reloads += 1;
+        self.reload_error = None;
         eprintln!("reload: {}", self.paths.config.display());
         for d in &mut self.audio {
             let settings = match d.kind() {
@@ -306,6 +370,44 @@ impl State {
             });
         }
         self.config = config;
+    }
+
+    fn publish(&mut self) {
+        let Some(server) = &mut self.status else {
+            return;
+        };
+        let started = &self.started;
+        let unavailable = |error: &Option<String>| status::Device {
+            state: status::State::Unavailable,
+            error: error.clone(),
+            ..status::Device::default()
+        };
+        let audio = |kind, enabled: bool, error: &Option<String>| {
+            if !enabled {
+                return status::Device::default();
+            }
+            self.audio
+                .iter()
+                .find(|d| d.kind() == kind)
+                .map_or_else(|| unavailable(error), AudioDevice::status)
+        };
+        let camera = if started.camera.enabled {
+            self.camera
+                .as_ref()
+                .map_or_else(|| unavailable(&self.camera_error), Camera::status)
+        } else {
+            status::Device::default()
+        };
+        server.publish(&status::Status {
+            protocol: status::PROTOCOL,
+            version: env!("CARGO_PKG_VERSION").into(),
+            reloads: self.reloads,
+            reload_error: self.reload_error.clone(),
+            restart_pending: config::needs_restart(started, &self.config),
+            mic: audio(Kind::Mic, started.mic.enabled, &None),
+            speaker: audio(Kind::Speaker, started.speaker.enabled, &self.speaker_error),
+            camera,
+        });
     }
 
     fn send_after(&self, delay: Duration, event: Event) {

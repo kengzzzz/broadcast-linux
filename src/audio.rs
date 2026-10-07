@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use crate::config::{MicConfig, SpeakerConfig, Stage};
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
 use crate::service::{Event, EventSender};
+use crate::status::{self, State};
 use crate::worker::{Launch, Worker};
 
 const RATE: u32 = 48_000;
@@ -52,7 +53,7 @@ impl Kind {
         }
     }
 
-    pub(crate) fn node_name(self) -> &'static str {
+    pub fn node_name(self) -> &'static str {
         match self {
             Self::Mic => "broadcast_linux_mic",
             Self::Speaker => "broadcast_linux_speaker",
@@ -115,6 +116,7 @@ pub struct AudioDevice {
     failures: u32,
     /// Bumped whenever a pending idle timeout should be ignored.
     idle_token: u64,
+    last_error: Option<String>,
 }
 
 struct Session {
@@ -135,6 +137,8 @@ struct Shared {
     reprime: AtomicBool,
     sent: AtomicU64,
     received: AtomicU64,
+    /// Usually the reason when a worker fails to start.
+    last_line: Mutex<String>,
 }
 
 impl Drop for Session {
@@ -198,6 +202,7 @@ impl AudioDevice {
             next_session: 0,
             failures: 0,
             idle_token: 0,
+            last_error: None,
         })
     }
 
@@ -224,6 +229,25 @@ impl AudioDevice {
 
     pub fn readers(&self) -> usize {
         self.readers.len()
+    }
+
+    pub fn status(&self) -> status::Device {
+        let state = match &self.session {
+            None => State::Idle,
+            Some(s) if s.stream.is_none() => State::Paused,
+            Some(s) if !s.ready => State::Loading,
+            Some(_) => State::Running,
+        };
+        status::Device {
+            state,
+            readers: self.readers.len(),
+            error: self.last_error.clone(),
+        }
+    }
+
+    fn fail(&mut self, message: String) {
+        eprintln!("{}: {message}", self.kind.label());
+        self.last_error = Some(message);
     }
 
     pub fn link_added(&mut self, link: u32, output_node: u32, input_node: u32) -> bool {
@@ -273,7 +297,7 @@ impl AudioDevice {
             }
             Err(e) => {
                 self.clear_rings();
-                eprintln!("{}: could not start: {e:#}", self.kind.label());
+                self.fail(format!("could not start: {e:#}"));
             }
         }
     }
@@ -345,7 +369,7 @@ impl AudioDevice {
                     eprintln!("{}: resumed", self.kind.label());
                 }
                 Err(e) => {
-                    eprintln!("{}: could not resume: {e:#}", self.kind.label());
+                    self.fail(format!("could not resume: {e:#}"));
                     self.session = Some(session);
                     self.stop();
                     return;
@@ -359,6 +383,7 @@ impl AudioDevice {
         if let Some(s) = self.session.as_mut().filter(|s| s.id == session) {
             s.ready = true;
             self.failures = 0;
+            self.last_error = None;
             eprintln!("{}: effect running", self.kind.label());
         }
     }
@@ -366,27 +391,26 @@ impl AudioDevice {
     pub fn worker_exited(&mut self, session: u64) -> Option<Duration> {
         let current = self.session.as_ref().filter(|s| s.id == session)?;
         let was_ready = current.ready;
+        let reason = current.shared.last_line.lock().unwrap().clone();
         self.stop();
         self.failures += 1;
+        let what = if was_ready {
+            "the worker crashed"
+        } else {
+            "the effect failed to load"
+        };
+        let what = if reason.is_empty() {
+            what.to_owned()
+        } else {
+            format!("{what}: {reason}")
+        };
         if !was_ready && self.failures > 2 {
-            eprintln!(
-                "{}: the effect failed to load twice; giving up until the next use",
-                self.kind.label()
-            );
+            self.fail(format!("{what}; giving up until the next use"));
             self.failures = 0;
             return None;
         }
         let delay = Duration::from_secs(1 << self.failures.min(5));
-        eprintln!(
-            "{}: worker {} ; restarting in {}s",
-            self.kind.label(),
-            if was_ready {
-                "crashed"
-            } else {
-                "failed to start"
-            },
-            delay.as_secs()
-        );
+        self.fail(format!("{what}; restarting in {}s", delay.as_secs()));
         Some(delay)
     }
 
@@ -440,7 +464,12 @@ impl AudioDevice {
         let (feeder, inputs) = mpsc::channel::<Cons>();
         let kind = self.kind;
         let events = self.events.clone();
-        thread::spawn(move || watch_stderr(pipes.stderr, &frame_tx, &events, kind, id));
+        {
+            let shared = shared.clone();
+            thread::spawn(move || {
+                watch_stderr(pipes.stderr, &frame_tx, &events, &shared, kind, id);
+            });
+        }
         {
             let (shared, stats) = (shared.clone(), self.stats.clone());
             let feeder = thread::spawn(move || {
@@ -678,11 +707,13 @@ fn watch_stderr(
     stderr: impl Read,
     frame: &mpsc::Sender<usize>,
     events: &EventSender,
+    shared: &Shared,
     kind: Kind,
     session: u64,
 ) {
     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
         eprintln!("{} worker: {line}", kind.label());
+        line.clone_into(&mut shared.last_line.lock().unwrap());
         // "<effect> ready; <n> samples per frame at 48 kHz mono f32"
         if let Some(n) = line
             .split_once(" ready; ")

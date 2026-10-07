@@ -4,6 +4,8 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
+use crate::progress::{self, Progress};
+
 const SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
 
 /// Reads the 7z archive after the Windows stub in NVIDIA's self-extracting installers.
@@ -38,39 +40,73 @@ fn archive_offset(path: &Path) -> Result<u64> {
         .with_context(|| format!("{} does not contain a 7z archive", path.display()))
 }
 
-pub fn extract(
-    installer: &Path,
-    out: &Path,
-    mut select: impl FnMut(&str) -> Option<String>,
-) -> Result<usize> {
+fn open(installer: &Path) -> Result<sevenz_rust2::ArchiveReader<Embedded<BufReader<File>>>> {
     let base = archive_offset(installer)?;
     let mut file = BufReader::new(File::open(installer)?);
     file.seek(SeekFrom::Start(base))?;
-    let mut reader = sevenz_rust2::ArchiveReader::new(
+    sevenz_rust2::ArchiveReader::new(
         Embedded { inner: file, base },
         sevenz_rust2::Password::empty(),
     )
-    .with_context(|| format!("reading the archive in {}", installer.display()))?;
+    .with_context(|| format!("reading the archive in {}", installer.display()))
+}
 
+/// Decodes only the archive data up to `name`, not the whole installer.
+pub fn extract_file(installer: &Path, name: &str, dest: &Path) -> Result<()> {
+    let data = open(installer)?
+        .read_file(name)
+        .with_context(|| format!("{} has no {name}", installer.display()))?;
+    fs::create_dir_all(dest.parent().unwrap_or(Path::new(".")))?;
+    fs::write(dest, data)?;
+    Ok(())
+}
+
+pub fn extract(
+    installer: &Path,
+    out: &Path,
+    progress: &dyn Progress,
+    mut select: impl FnMut(&str) -> Option<String>,
+) -> Result<usize> {
+    let mut reader = open(installer)?;
+    let total = reader
+        .archive()
+        .files
+        .iter()
+        .map(sevenz_rust2::ArchiveEntry::size)
+        .sum();
+
+    let mut done = 0;
     let mut written = 0;
-    reader.for_each_entries(|entry, data| {
-        let name = entry.name().replace('\\', "/");
-        let target = match select(&name) {
-            Some(target) if !entry.is_directory() => target,
-            _ => {
-                io::copy(data, &mut io::sink())?;
-                return Ok(true);
+    // sevenz_rust2 only stops the current block when the callback returns false,
+    // so failures and cancelling leave through an error and are kept here.
+    let mut failure = None;
+    let result = reader.for_each_entries(|entry, data| {
+        let mut step = || -> Result<()> {
+            let name = entry.name().replace('\\', "/");
+            match select(&name).filter(|_| !entry.is_directory()) {
+                Some(target) => {
+                    let dest = out.join(safe_relative(&target)?);
+                    fs::create_dir_all(dest.parent().unwrap_or(out))?;
+                    let mut file = File::create(&dest)?;
+                    progress::copy(data, &mut file, &mut done, total, progress)?;
+                    written += 1;
+                }
+                None => progress::copy(data, &mut io::sink(), &mut done, total, progress)?,
             }
+            Ok(())
         };
-        if let Err(e) = safe_relative(&target) {
-            return Err(io::Error::other(e.to_string()).into());
+        match step() {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                failure = Some(e);
+                Err(io::Error::other("stopped").into())
+            }
         }
-        let dest = out.join(&target);
-        fs::create_dir_all(dest.parent().unwrap_or(out))?;
-        io::copy(data, &mut File::create(&dest)?)?;
-        written += 1;
-        Ok(true)
-    })?;
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    result?;
     Ok(written)
 }
 

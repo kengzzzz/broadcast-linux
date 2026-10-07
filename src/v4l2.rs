@@ -1,14 +1,19 @@
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Result, anyhow, bail};
+
+use crate::paths;
 
 pub(crate) const VIDIOC_S_FMT: libc::c_ulong = 0xC0D0_5605;
 const VIDIOC_SUBSCRIBE_EVENT: libc::c_ulong = 0x4020_565A;
 const VIDIOC_DQEVENT: libc::c_ulong = 0x8088_5659;
+const EVENT_SUB_FL_SEND_INITIAL: u32 = 1;
 /// v4l2loopback's private event: 1 while some app streams from the device.
 const EVENT_CLIENT_USAGE: u32 = 0x0800_0000 + 0x08E0_0000 + 1;
 const BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
@@ -71,7 +76,10 @@ impl Loopback {
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
-            .map_err(|e| anyhow!("opening {path}: {e}{}", open_hint(&e)))?;
+            .map_err(|e| match open_hint(&e) {
+                Some(hint) => anyhow!("opening {path}: {e}; {hint}"),
+                None => anyhow!("opening {path}: {e}"),
+            })?;
         let mut format = Format::new(
             BUF_TYPE_VIDEO_OUTPUT,
             PixFormat {
@@ -100,10 +108,20 @@ impl Loopback {
             }
             bail!("setting the output format on {path}: {e}");
         }
+        // While another app holds the device, the driver keeps its format and reports
+        // success anyway; frames of the requested size would then be garbled.
+        let (w, h) = (format.pix.width, format.pix.height);
+        if (w, h) != (width, height) || format.pix.pixelformat != YUYV {
+            bail!(
+                "{path} is still in use at {w}x{h}; close the apps using the camera, then restart the service"
+            );
+        }
+        // The initial event reports readers that were already streaming, e.g. across a
+        // service restart.
         let mut sub = EventSubscription {
             type_: EVENT_CLIENT_USAGE,
             id: 0,
-            flags: 0,
+            flags: EVENT_SUB_FL_SEND_INITIAL,
             reserved: [0; 5],
         };
         // SAFETY: `sub` matches struct v4l2_event_subscription (32 bytes).
@@ -138,21 +156,60 @@ impl Loopback {
     }
 }
 
-const VIDEO_CLASS: &str = "/sys/class/video4linux";
+pub(crate) const VIDEO_CLASS: &str = "/sys/class/video4linux";
 
-/// Checks the loopback device without opening it; returns its label.
-pub(crate) fn check(path: &str) -> Result<String> {
-    if !is_loopback(path) {
-        if Path::new(path).exists() {
-            bail!("{path} is not a v4l2loopback device; {}", devices_hint());
+#[derive(Clone, Debug)]
+pub struct Hint {
+    pub text: String,
+    pub commands: Vec<String>,
+}
+
+impl Hint {
+    fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            commands: Vec::new(),
         }
-        bail!("{path} does not exist; {}", devices_hint());
     }
-    let c_path = std::ffi::CString::new(path)?;
+
+    fn prefixed(mut self, prefix: &str) -> Self {
+        self.text = format!("{prefix}; {}", self.text);
+        self
+    }
+}
+
+impl fmt::Display for Hint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)?;
+        for (i, command) in self.commands.iter().enumerate() {
+            let join = if i == 0 { ": run" } else { ", then" };
+            write!(f, "{join} `{command}`")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Hint {}
+
+/// Doesn't open the device; returns its label.
+pub fn check(path: &str) -> Result<String, Hint> {
+    if !is_loopback(path) {
+        let problem = if Path::new(path).exists() {
+            format!("{path} is not a v4l2loopback device")
+        } else {
+            format!("{path} does not exist")
+        };
+        return Err(devices_hint().prefixed(&problem));
+    }
+    let c_path = std::ffi::CString::new(path).map_err(|_| Hint::text("invalid device path"))?;
     // SAFETY: access() only reads the NUL-terminated path.
     if unsafe { libc::access(c_path.as_ptr(), libc::R_OK | libc::W_OK) } != 0 {
         let e = io::Error::last_os_error();
-        bail!("{path}: {e}{}", open_hint(&e));
+        let problem = format!("{path}: {e}");
+        return Err(match open_hint(&e) {
+            Some(hint) => hint.prefixed(&problem),
+            None => Hint::text(problem),
+        });
     }
     Ok(fs::canonicalize(path)
         .ok()
@@ -164,18 +221,19 @@ pub(crate) fn check(path: &str) -> Result<String> {
         .to_owned())
 }
 
-fn open_hint(e: &io::Error) -> String {
+fn open_hint(e: &io::Error) -> Option<Hint> {
     match e.kind() {
-        io::ErrorKind::NotFound => format!("; {}", devices_hint()),
-        io::ErrorKind::PermissionDenied => {
-            "; join the video group (`sudo usermod -aG video $USER`), then log in again".into()
-        }
-        _ => String::new(),
+        io::ErrorKind::NotFound => Some(devices_hint()),
+        io::ErrorKind::PermissionDenied => Some(Hint {
+            text: "join the video group, then log in again".into(),
+            commands: vec!["sudo usermod -aG video $USER".into()],
+        }),
+        _ => None,
     }
 }
 
 /// `max_openers` is a sysfs attribute only v4l2loopback devices have.
-fn is_loopback_dir(dir: &Path) -> bool {
+pub(crate) fn is_loopback_dir(dir: &Path) -> bool {
     dir.join("max_openers").exists()
 }
 
@@ -189,9 +247,20 @@ fn is_loopback(path: &str) -> bool {
         .is_some_and(|dir| is_loopback_dir(&dir))
 }
 
-fn devices_hint() -> String {
+fn devices_hint() -> Hint {
+    let mut commands = module_config_commands();
     if !Path::new("/sys/module/v4l2loopback").exists() {
-        return "v4l2loopback is not loaded: run `sudo modprobe v4l2loopback`".into();
+        commands.push("sudo modprobe v4l2loopback".into());
+        let text = if module_installed() {
+            "v4l2loopback is not loaded"
+        } else {
+            "v4l2loopback is not installed; install your distribution's v4l2loopback \
+             package (often v4l2loopback-dkms), then load it"
+        };
+        return Hint {
+            text: text.into(),
+            commands,
+        };
     }
     let mut dirs: Vec<PathBuf> = fs::read_dir(VIDEO_CLASS)
         .into_iter()
@@ -200,10 +269,12 @@ fn devices_hint() -> String {
         .map(|entry| entry.path())
         .filter(|dir| is_loopback_dir(dir))
         .collect();
-    if dirs.is_empty() {
-        return "no v4l2loopback devices exist; reload the module to apply its modprobe.d \
-                options: `sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback`"
-            .into();
+    if dirs.is_empty() || !commands.is_empty() {
+        commands.push("sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback".into());
+        return Hint {
+            text: "v4l2loopback was loaded without this app's options; reload it".into(),
+            commands,
+        };
     }
     dirs.sort_by_key(|dir| {
         dir.file_name()
@@ -217,10 +288,44 @@ fn devices_hint() -> String {
             Some(format!("/dev/{node} \"{}\"", label.trim()))
         })
         .collect();
-    format!(
+    Hint::text(format!(
         "set [camera] device to a v4l2loopback device: {}",
         devices.join(", ")
-    )
+    ))
+}
+
+/// Installs the module options and autoload files, unless a package or an earlier run did.
+fn module_config_commands() -> Vec<String> {
+    let share = paths::share_dir();
+    [
+        ("modprobe.d", "modprobe.conf"),
+        ("modules-load.d", "modules-load.conf"),
+    ]
+    .into_iter()
+    .filter(|(dir, _)| {
+        ["/etc", "/usr/lib", "/lib"].iter().all(|root| {
+            !Path::new(root)
+                .join(dir)
+                .join("broadcast-linux.conf")
+                .exists()
+        })
+    })
+    .map(|(dir, file)| {
+        format!(
+            "sudo install -Dm644 {} /etc/{dir}/broadcast-linux.conf",
+            share.join(file).display()
+        )
+    })
+    .collect()
+}
+
+fn module_installed() -> bool {
+    Command::new("modinfo")
+        .args(["-n", "v4l2loopback"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]

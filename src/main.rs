@@ -1,22 +1,7 @@
-mod audio;
-mod camera;
-mod config;
-mod doctor;
-mod download;
-mod frames;
-mod gpu;
-mod mjpeg;
-mod nvidia;
-mod paths;
-mod prefix;
-mod service;
-mod setup;
-mod sevenzip;
-mod v4l2;
-mod webcam;
-mod worker;
-
 use anyhow::Result;
+use broadcast_linux::paths::Paths;
+use broadcast_linux::progress::Terminal;
+use broadcast_linux::{doctor, service, setup};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -36,8 +21,8 @@ enum Commands {
         /// Accept NVIDIA's licence without the interactive prompt
         #[arg(long)]
         accept_eula: bool,
-        /// Allow installers whose checksum is not pinned yet (size check only)
-        #[arg(long)]
+        /// Ignored; kept so existing scripts still work
+        #[arg(long, hide = true)]
         allow_unverified: bool,
         /// Keep the downloaded installer after extraction
         #[arg(long)]
@@ -53,13 +38,16 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Setup {
             accept_eula,
-            allow_unverified,
+            allow_unverified: _,
             keep_installer,
-        } => setup::run(&setup::Options {
-            accept_eula,
-            allow_unverified,
-            keep_installer,
-        }),
+        } => setup::run(
+            &Paths::new()?,
+            &setup::Options { keep_installer },
+            &setup::Terminal {
+                progress: Terminal::new(),
+                preaccepted: accept_eula,
+            },
+        ),
         Commands::Run => service::run(),
         Commands::Doctor => doctor::run(),
     }

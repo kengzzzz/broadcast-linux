@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=broadcast-linux
+GenericName=Mic and Camera Effects
+Comment=NVIDIA Broadcast noise removal and camera effects for your mic, speaker and webcam
+Exec=broadcast-linux-gui
+Icon=broadcast-linux
+Terminal=false
+Categories=AudioVideo;
+Keywords=noise;microphone;mic;camera;webcam;background;blur;echo;voice;
+StartupWMClass=broadcast-linux

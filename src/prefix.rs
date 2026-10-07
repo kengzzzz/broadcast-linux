@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 
 use crate::download;
+use crate::progress::Progress;
 
 struct Release {
     url: &'static str,
@@ -29,9 +30,15 @@ const DXVK_NVAPI: Release = Release {
     dlls: &["nvapi64.dll"],
 };
 
-pub fn create(prefix: &Path, downloads: &Path, relay: &Path) -> Result<()> {
-    if !prefix.join("system.reg").exists() {
-        eprintln!("Creating Wine prefix {}", prefix.display());
+pub fn create(
+    prefix: &Path,
+    downloads: &Path,
+    relay: &Path,
+    progress: &dyn Progress,
+) -> Result<()> {
+    let created = !prefix.join("system.reg").exists();
+    if created {
+        progress.step(&format!("Creating Wine prefix {}", prefix.display()));
         fs::create_dir_all(prefix)?;
         let status = Command::new("wineboot")
             .arg("-u")
@@ -55,21 +62,53 @@ pub fn create(prefix: &Path, downloads: &Path, relay: &Path) -> Result<()> {
             relay.display()
         );
     }
-    fs::copy(&stub, system32.join("nvcuda.dll"))?;
+    write_if_changed(&system32.join("nvcuda.dll"), &fs::read(&stub)?)?;
     for release in [&DXVK, &DXVK_NVAPI] {
         let name = release.url.rsplit('/').next().unwrap_or("release.tar.gz");
         let archive = downloads.join(name);
-        download::fetch(release.url, &archive, release.size, Some(release.sha256))?;
+        download::fetch(
+            release.url,
+            &archive,
+            release.size,
+            release.sha256,
+            progress,
+        )?;
         install_dlls(&archive, &system32, release.dlls)?;
     }
 
-    // Let the new prefix's background processes settle before the first worker.
-    Command::new("wineserver")
-        .arg("-w")
-        .env("WINEPREFIX", prefix)
-        .status()
-        .context("running wineserver -w")?;
+    // Let a new prefix's background processes settle before the first worker. In an
+    // existing prefix this would also wait for the service's running workers.
+    if created {
+        Command::new("wineserver")
+            .arg("-w")
+            .env("WINEPREFIX", prefix)
+            .status()
+            .context("running wineserver -w")?;
+    }
     Ok(())
+}
+
+/// What is missing from the prefix, or `None` when it is complete.
+pub fn problem(prefix: &Path) -> Option<String> {
+    let system32 = prefix.join("drive_c/windows/system32");
+    let complete = prefix.join("system.reg").exists()
+        && ["nvcuda.dll", "dxgi.dll", "d3d11.dll", "nvapi64.dll"]
+            .iter()
+            .all(|dll| system32.join(dll).exists());
+    (!complete).then(|| {
+        format!(
+            "{} is incomplete; run `broadcast-linux setup`",
+            prefix.display()
+        )
+    })
+}
+
+/// Leaves identical files alone: a running worker may have them mapped.
+fn write_if_changed(path: &Path, data: &[u8]) -> Result<()> {
+    if fs::read(path).is_ok_and(|current| current == data) {
+        return Ok(());
+    }
+    fs::write(path, data).with_context(|| format!("writing {}", path.display()))
 }
 
 fn install_dlls(archive: &Path, system32: &Path, dlls: &[&str]) -> Result<()> {
@@ -86,7 +125,9 @@ fn install_dlls(archive: &Path, system32: &Path, dlls: &[&str]) -> Result<()> {
             .and_then(|p| p.file_name())
             .is_some_and(|d| d == "x64");
         if let Some(pos) = remaining.iter().position(|d| *d == file).filter(|_| in_x64) {
-            io::copy(&mut entry, &mut File::create(system32.join(file))?)?;
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data)?;
+            write_if_changed(&system32.join(file), &data)?;
             remaining.swap_remove(pos);
         }
     }

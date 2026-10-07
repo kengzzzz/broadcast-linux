@@ -6,10 +6,16 @@ pkgrel=1
 pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
 url="https://github.com/kengzzzz/broadcast-linux"
-license=(MIT LGPL-2.1-or-later BSD-3-Clause IJG)
-depends=(gcc-libs glibc libpipewire pipewire wireplumber libpulse 'wine>=11' nvidia-utils)
+license=(MIT LGPL-2.1-or-later BSD-3-Clause IJG OFL-1.1 Ubuntu-font-1.0 Bitstream-Vera)
+depends=(gcc-libs glibc libpipewire pipewire pipewire-pulse wireplumber libpulse 'wine>=11' nvidia-utils libglvnd libxkbcommon wayland)
 makedepends=(cargo clang cmake git meson nasm ninja)
-optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)')
+optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)'
+            'xdg-desktop-portal: picking a background image in the settings window'
+            'libx11: the settings window on X11'
+            'libxcursor: the settings window on X11'
+            'libxi: the settings window on X11'
+            'libxrender: the settings window on X11'
+            'libxkbcommon-x11: the settings window on X11')
 options=(!lto !debug)
 install=broadcast-linux.install
 source=("git+$url.git#tag=v$pkgver"
@@ -33,7 +39,7 @@ build() {
 
 check() {
     cd "$pkgname"
-    cargo test --frozen --release
+    cargo test --frozen --release --workspace
 }
 
 package() {
@@ -43,9 +49,13 @@ package() {
     install -Dm644 packaging/modules-load.conf "$pkgdir/usr/lib/modules-load.d/broadcast-linux.conf"
     install -Dm644 packaging/modprobe.conf "$pkgdir/usr/lib/modprobe.d/broadcast-linux.conf"
     install -Dm644 packaging/config.toml "$pkgdir/usr/share/doc/$pkgname/config.toml"
+    install -Dm644 packaging/broadcast-linux.desktop "$pkgdir/usr/share/applications/broadcast-linux.desktop"
+    install -Dm644 packaging/broadcast-linux.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/broadcast-linux.svg"
     install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname/"
+    install -Dm644 docs/*.md -t "$pkgdir/usr/share/doc/$pkgname/docs/"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 wine-nvcuda/LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvcuda.md"
     install -Dm644 vfx-api/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nvidia-vfx-headers"
     install -Dm644 packaging/LICENSE.libjpeg-turbo "$pkgdir/usr/share/licenses/$pkgname/LICENSE.libjpeg-turbo"
+    install -Dm644 packaging/LICENSE.fonts "$pkgdir/usr/share/licenses/$pkgname/LICENSE.fonts"
 }
