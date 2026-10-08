@@ -35,6 +35,6 @@ pkgbase = broadcast-linux-bin
 	options = !strip
 	options = !debug
 	source = https://github.com/kengzzzz/broadcast-linux/releases/download/v0.4.1/broadcast-linux-0.4.1-x86_64.tar.gz
-	sha256sums = 8ce6fa04f7cad92bb1e35fdabf01df97d5bff14f187521b548a8219837c51de2
+	sha256sums = 4f4fa643a69fcdf360154c5a4237c4a2fabe44c5ed60057bd06c0898c8190a54
 
 pkgname = broadcast-linux-bin
