@@ -69,3 +69,24 @@ installs the packages on Debian 13, Ubuntu 26.04 and Fedora 44, then publishes a
 with `SHA256SUMS` and the top-level `install.sh`, which picks the right one for the user's distribution.
 
 See [AUR publishing](../packaging/README.md) for publishing the binary package.
+
+## Updating NVIDIA Broadcast
+
+The `nvidia-update` workflow runs every Monday and can be started by hand. When
+NVIDIA's Broadcast page offers a newer build, it opens an issue with the new installer
+entries and checks that each installer still has the files the code names. It also
+fails when a pinned NVIDIA installer is gone or has changed size, because setup then
+breaks for new users. Run the same check locally with `ci/nvidia-update.sh report.md`. It needs
+7-Zip and downloads about 9 GB when a new build exists.
+
+To move to a new build:
+
+1. Paste the issue's `BUILD` and installer entries into `src/setup.rs`.
+2. If the issue lists missing files, update the model folder and file names in
+   `src/nvidia.rs` and `src/config.rs`, or the paths `extract` keeps in `src/setup.rs`.
+3. Run setup, then test every microphone, speaker and camera effect on a GPU. A newer
+   CUDA runtime in NVIDIA's files can ask for a driver export table that the bundled
+   nvcuda relay lacks, like the one `patches/nvcuda-export-table-d2688bf2.patch` adds.
+   That only shows up when an effect starts.
+4. Add a CHANGELOG entry. Users rerun setup after upgrading, and setup then removes
+   the previous build's files.

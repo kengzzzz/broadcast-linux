@@ -1,0 +1,35 @@
+name: nvidia-update
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq 7zip
+      - name: Check NVIDIA Broadcast downloads
+        run: ci/nvidia-update.sh "$RUNNER_TEMP/report.md"
+      - name: Open an issue for a new build
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          report=$RUNNER_TEMP/report.md
+          [[ -f $report ]] || exit 0
+          title=$(head -1 "$report")
+          seen=$(gh issue list --state all --search "\"$title\" in:title" --json title \
+            --jq "map(select(.title == \"$title\")) | length")
+          if [[ $seen -gt 0 ]]; then
+            echo "An issue for \"$title\" already exists"
+            exit 0
+          fi
+          tail -n +3 "$report" | gh issue create --title "$title" --body-file -

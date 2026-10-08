@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Setup: removes the previous NVIDIA Broadcast build's files after installing a newer one.
+
 ## 0.4.1 - 2026-10-08
 
 One install command for every distribution, plus `.deb` and `.rpm` packages.

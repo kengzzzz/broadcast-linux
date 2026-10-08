@@ -20,14 +20,7 @@ pub struct Installation {
 
 impl Installation {
     pub fn find(paths: &Paths) -> Result<Self> {
-        let build = fs::read_dir(paths.nvidia())
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.join(".complete").exists())
-            .max()
+        let build = installed_build(&paths.nvidia())
             .context("NVIDIA Broadcast is not installed; run `broadcast-linux setup` first")?;
         let models = build.join("models");
         let runtime = newest_files_dir(&models.join("nvbcast"))?;
@@ -101,6 +94,30 @@ impl Installation {
     }
 }
 
+/// Falls back to the newest complete build, so the service runs until setup installs the pinned one.
+fn installed_build(nvidia: &Path) -> Option<PathBuf> {
+    let pinned = nvidia.join(crate::setup::BUILD);
+    if pinned.join(".complete").exists() {
+        return Some(pinned);
+    }
+    fs::read_dir(nvidia)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.join(".complete").exists())
+        .filter_map(|p| Some((build_version(&p)?, p)))
+        .max()
+        .map(|(_, p)| p)
+}
+
+pub fn build_version(dir: &Path) -> Option<Vec<u64>> {
+    dir.file_name()?
+        .to_str()?
+        .split('.')
+        .map(|n| n.parse().ok())
+        .collect()
+}
+
 /// Models are laid out as `<name>/versions/<version>/files/<gpu id>/`.
 fn newest_files_dir(model: &Path) -> Result<PathBuf> {
     let version = newest_child(&model.join("versions"))?;
@@ -120,4 +137,29 @@ fn newest_child(dir: &Path) -> Result<PathBuf> {
 /// Wine maps `Z:` to the Unix root.
 pub fn windows_path(path: &Path) -> String {
     format!("Z:{}", path.display().to_string().replace('/', "\\"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_pinned_build_then_newest_by_number() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-nvidia-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let complete = |name: &str| {
+            fs::create_dir_all(dir.join(name)).unwrap();
+            fs::write(dir.join(name).join(".complete"), "Ada\n").unwrap();
+        };
+        complete("1.9.0.1");
+        complete("1.10.0.1");
+        fs::create_dir_all(dir.join("1.11.0.1")).unwrap();
+        assert_eq!(installed_build(&dir), Some(dir.join("1.10.0.1")));
+
+        complete("99.0.0.1");
+        complete(crate::setup::BUILD);
+        assert_eq!(installed_build(&dir), Some(dir.join(crate::setup::BUILD)));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

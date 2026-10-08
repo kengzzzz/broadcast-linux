@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -20,7 +20,7 @@ pub struct Installer {
     pub sha256: &'static str,
 }
 
-const BUILD: &str = "2.2.1.58338310";
+pub const BUILD: &str = "2.2.1.58338310";
 
 pub const INSTALLERS: &[Installer] = &[
     Installer {
@@ -98,6 +98,12 @@ pub fn run(paths: &Paths, opts: &Options, ui: &dyn Ui) -> Result<()> {
             }
         }
     }
+    for old in remove_other_builds(&paths.nvidia())? {
+        ui.step(&format!(
+            "Removed old NVIDIA Broadcast files in {}",
+            old.display()
+        ));
+    }
 
     ui.check()?;
     prefix::create(
@@ -108,6 +114,22 @@ pub fn run(paths: &Paths, opts: &Options, ui: &dyn Ui) -> Result<()> {
     )?;
     ui.step(&format!("Setup complete: {}", paths.data.display()));
     Ok(())
+}
+
+fn remove_other_builds(nvidia: &Path) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for entry in fs::read_dir(nvidia)? {
+        let path = entry?.path();
+        if path.is_dir()
+            && path.file_name() != Some(BUILD.as_ref())
+            && crate::nvidia::build_version(&path).is_some()
+        {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("removing old NVIDIA files in {}", path.display()))?;
+            removed.push(path);
+        }
+    }
+    Ok(removed)
 }
 
 fn ensure_space(paths: &Paths, exe: &Path, size: u64) -> Result<()> {
@@ -316,6 +338,23 @@ mod tests {
             files_problem(&paths, Generation::Ada).is_some(),
             "no manifest, no runtime"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn removes_only_other_builds() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-builds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for name in [BUILD, "2.1.0.1", "2.10.0.1", "notes"] {
+            fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        fs::write(dir.join("1.0.0.1"), "").unwrap();
+        let mut removed = remove_other_builds(&dir).unwrap();
+        removed.sort();
+        assert_eq!(removed, [dir.join("2.1.0.1"), dir.join("2.10.0.1")]);
+        assert!(dir.join(BUILD).is_dir() && dir.join("notes").is_dir());
+        assert!(dir.join("1.0.0.1").is_file());
         fs::remove_dir_all(&dir).unwrap();
     }
 }
