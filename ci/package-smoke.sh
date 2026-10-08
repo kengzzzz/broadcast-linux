@@ -2,7 +2,7 @@
 # Installs the .deb or .rpm from DIST without optional dependencies and checks that
 # everything it ships can load. Runs inside a distro container; there is no GPU here.
 set -euo pipefail
-dist=$1
+dist=$(realpath -- "$1")
 if command -v apt-get >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$dist"/*.deb
