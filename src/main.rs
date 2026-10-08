@@ -1,7 +1,7 @@
 use anyhow::Result;
 use broadcast_linux::paths::Paths;
 use broadcast_linux::progress::Terminal;
-use broadcast_linux::{doctor, service, setup};
+use broadcast_linux::{doctor, graph, service, setup};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -32,6 +32,8 @@ enum Commands {
     Run,
     /// Check the setup and print what needs fixing
     Doctor,
+    /// List microphones and outputs with the node names the config uses
+    Devices,
 }
 
 fn main() -> Result<()> {
@@ -50,5 +52,6 @@ fn main() -> Result<()> {
         ),
         Commands::Run => service::run(),
         Commands::Doctor => doctor::run(),
+        Commands::Devices => graph::print_devices(),
     }
 }

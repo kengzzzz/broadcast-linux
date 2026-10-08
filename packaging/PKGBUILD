@@ -7,9 +7,10 @@ pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)
 url="https://github.com/kengzzzz/broadcast-linux"
 license=(MIT LGPL-2.1-or-later BSD-3-Clause IJG OFL-1.1 Ubuntu-font-1.0 Bitstream-Vera)
-depends=(gcc-libs glibc libpipewire pipewire pipewire-pulse wireplumber libpulse 'wine>=11' nvidia-utils libglvnd libxkbcommon wayland)
+depends=(gcc-libs glibc libpipewire pipewire wireplumber 'wine>=11' nvidia-utils libglvnd libxkbcommon wayland)
 makedepends=(cargo clang cmake git meson nasm ninja)
-optdepends=('v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)'
+optdepends=('pipewire-pulse: lets apps that use PulseAudio (most of them) see the devices'
+            'v4l2loopback-dkms: the virtual camera, unless your kernel already ships the module (CachyOS kernels do)'
             'xdg-desktop-portal: picking a background image in the settings window'
             'libx11: the settings window on X11'
             'libxcursor: the settings window on X11'

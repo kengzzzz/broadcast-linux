@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -9,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
@@ -17,6 +16,7 @@ use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 
 use crate::config::{MicConfig, SpeakerConfig, Stage};
+use crate::graph;
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
 use crate::service::{Event, EventSender};
@@ -415,7 +415,7 @@ impl AudioDevice {
     }
 
     fn start_session(&mut self, id: u64, paths: &Paths) -> Result<Session> {
-        let target = resolve_target(self.kind, &self.settings.target)?;
+        let target = graph::resolve(self.kind, &self.settings.target)?;
         let (in_prod, in_cons) = HeapRb::<f32>::new(RING).split();
         let (mut out_prod, out_cons) = HeapRb::<f32>::new(RING).split();
         let shared = Arc::new(Shared::default());
@@ -628,30 +628,6 @@ fn chain_name(stages: &[Stage]) -> String {
     }
 }
 
-pub(crate) fn resolve_target(kind: Kind, target: &str) -> Result<String> {
-    let (pactl, key, device) = match kind {
-        Kind::Mic => ("get-default-source", "input", "microphone"),
-        Kind::Speaker => ("get-default-sink", "output", "output device"),
-    };
-    let name = if target == "default" {
-        let out = Command::new("pactl")
-            .arg(pactl)
-            .output()
-            .with_context(|| format!("running pactl {pactl}"))?;
-        String::from_utf8(out.stdout)?.trim().to_owned()
-    } else {
-        target.to_owned()
-    };
-    if name.is_empty() {
-        bail!("no default {device} is set");
-    }
-    if name == kind.node_name() {
-        let label = kind.label();
-        bail!("{name} is this {label} itself; set [{label}] {key} to the real {device}");
-    }
-    Ok(name)
-}
-
 fn fill_output(stream: &pw::stream::Stream, ring: &mut Option<Cons>, stats: &Stats) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -753,7 +729,6 @@ fn feed_worker(
         }
     };
     ring.clear();
-    let mut samples = vec![0f32; frame];
     let mut bytes = vec![0u8; frame * 4];
     while !shared.stop.load(Ordering::Relaxed) {
         while let Ok(input) = inputs.try_recv() {
@@ -764,14 +739,14 @@ fn feed_worker(
             thread::park_timeout(Duration::from_millis(if paused { 50 } else { 20 }));
             continue;
         }
-        ring.pop_slice(&mut samples);
         let in_flight =
             shared.sent.load(Ordering::Relaxed) - shared.received.load(Ordering::Relaxed);
         if in_flight >= MAX_IN_FLIGHT {
+            ring.skip(frame);
             stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        for (b, s) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(&samples) {
+        for (b, s) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(ring.pop_iter()) {
             *b = s.to_le_bytes();
         }
         if stdin
@@ -795,29 +770,25 @@ fn drain_worker(
     session: u64,
 ) {
     let mut buf = [0u8; 16_384];
-    let mut carry = Vec::with_capacity(4);
+    // Bytes at the front of `buf` left over from a read that split a sample.
+    let mut carry = 0;
     let mut frame_samples = 0;
     let mut primed = false;
     loop {
-        let n = match stdout.read(&mut buf) {
+        let n = match stdout.read(&mut buf[carry..]) {
             Ok(0) | Err(_) => break,
-            Ok(n) => n,
+            Ok(n) => carry + n,
         };
         if !primed || shared.reprime.swap(false, Ordering::Relaxed) {
             ring.push_iter(std::iter::repeat_n(0.0, CUSHION));
             primed = true;
             stats.flowing.store(true, Ordering::Relaxed);
         }
-        carry.extend_from_slice(&buf[..n]);
-        let whole = carry.len() / 4 * 4;
-        let samples = carry[..whole]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b));
+        let (samples, rest) = buf[..n].as_chunks::<4>();
         frame_samples += samples.len();
-        ring.push_iter(samples);
-        carry.drain(..whole);
+        ring.push_iter(samples.iter().map(|b| f32::from_le_bytes(*b)));
+        carry = rest.len();
+        buf.copy_within(n - carry..n, 0);
         while frame_samples >= FRAME {
             frame_samples -= FRAME;
             shared.received.fetch_add(1, Ordering::Relaxed);

@@ -46,14 +46,14 @@ systemctl --user restart broadcast-linux
 Select your real microphone on the **Microphone** page and click **Apply**. To make
 the virtual mic the system default, use **Make it the system default** afterwards.
 
-From the terminal, list your sources, set `[mic] input` to the real mic's node name
-in the config and reload before changing the default:
+From the terminal, list your microphones, set `[mic] input` to the real mic's node
+name in the config and reload before changing the default:
 
 ```sh
-pactl list short sources
+broadcast-linux devices
 # After setting [mic] input in the config:
 systemctl --user reload broadcast-linux
-pactl set-default-source broadcast_linux_mic
+wpctl set-default ID    # the ID of broadcast_linux_mic in the list above
 ```
 
 Use **NVIDIA Broadcast Mic** as the input in your call or recording app. Studio
@@ -64,7 +64,7 @@ removal uses the higher of their strengths.
 
 Enable processing on the **Speaker** page and choose your real output. In the
 config, set `[speaker] enabled = true` and `output` to `"default"` or a real sink's
-node name from `pactl list short sinks`, then restart the service.
+node name from `broadcast-linux devices`, then restart the service.
 
 Select **NVIDIA Broadcast Speaker** as your call app's output. Processing is mono
 and tuned for speech. Keep music and games on your real output.

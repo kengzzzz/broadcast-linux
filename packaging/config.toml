@@ -6,7 +6,7 @@
 
 [mic]
 enabled = true
-# "default" | real mic node name (`pactl list short sources`).
+# "default" | real mic node name (`broadcast-linux devices`).
 # Set a real node name before making Broadcast Mic the default input.
 input = "default"
 # Noise removal; strength 0.0 = no effect, 1.0 = full effect.
@@ -23,7 +23,7 @@ name = "NVIDIA Broadcast Mic"
 [speaker]
 # Mono effects for call audio played to "NVIDIA Broadcast Speaker"; not for music.
 enabled = false
-# "default" | real output node name (`pactl list short sinks`).
+# "default" | real output node name (`broadcast-linux devices`).
 output = "default"
 noise_removal = { enabled = true, strength = 1.0 }
 room_echo_removal = { enabled = false, strength = 1.0 }

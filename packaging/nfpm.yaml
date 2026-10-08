@@ -1,0 +1,106 @@
+# .deb and .rpm from the unpacked release tarball (paths are relative to it); see
+# ci/release-packages.sh.
+name: broadcast-linux
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: video
+priority: optional
+maintainer: kengzzzz <github.ezgew@spk4x.com>
+description: NVIDIA Broadcast effects as a virtual mic and camera under Wine
+vendor: kengzzzz
+homepage: https://github.com/kengzzzz/broadcast-linux
+license: MIT AND LGPL-2.1-or-later AND BSD-3-Clause AND IJG AND OFL-1.1 AND Ubuntu-font-1.0 AND Bitstream-Vera
+
+contents:
+  - src: bin/broadcast-linux
+    dst: /usr/bin/broadcast-linux
+  - src: bin/broadcast-linux-gui
+    dst: /usr/bin/broadcast-linux-gui
+  - src: lib/broadcast-linux
+    dst: /usr/lib/broadcast-linux
+    type: tree
+  - src: share/broadcast-linux.service
+    dst: /usr/lib/systemd/user/broadcast-linux.service
+  - src: share/modules-load.conf
+    dst: /usr/lib/modules-load.d/broadcast-linux.conf
+  - src: share/modprobe.conf
+    dst: /usr/lib/modprobe.d/broadcast-linux.conf
+  - src: share/broadcast-linux.desktop
+    dst: /usr/share/applications/broadcast-linux.desktop
+  - src: share/broadcast-linux.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/broadcast-linux.svg
+  - src: share/config.toml
+    dst: /usr/share/doc/broadcast-linux/config.toml
+  - src: README.md
+    dst: /usr/share/doc/broadcast-linux/README.md
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/broadcast-linux/CHANGELOG.md
+  - src: BUILD-INFO
+    dst: /usr/share/doc/broadcast-linux/BUILD-INFO
+  - src: docs
+    dst: /usr/share/doc/broadcast-linux/docs
+    type: tree
+  - src: LICENSE*
+    dst: /usr/share/doc/broadcast-linux/
+    packager: deb
+  - src: LICENSE*
+    dst: /usr/share/licenses/broadcast-linux/
+    packager: rpm
+
+scripts:
+  postinstall: packaging/postinstall.sh
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libgcc-s1
+      - libpipewire-0.3-0t64
+      - pipewire
+      - wireplumber
+      - wine (>= 10)
+      - wine64 (>= 10)
+      - libvulkan1
+      - libgl1
+      - libegl1
+      - libxkbcommon0
+      - libwayland-client0
+      - libxrandr2
+    recommends:
+      - pipewire-pulse
+      - v4l2loopback-dkms
+      - xdg-desktop-portal
+      - libx11-6
+      - libxcursor1
+      - libxi6
+      - libxrender1
+      - libxkbcommon-x11-0
+  rpm:
+    depends:
+      - glibc >= 2.35
+      - libgcc
+      - pipewire-libs
+      - pipewire
+      - wireplumber
+      - wine-core(x86-64) >= 10
+      - wine-common >= 10
+      - vulkan-loader
+      - libglvnd-egl
+      - libglvnd-glx
+      - libxkbcommon
+      - libwayland-client
+      - libXrandr
+    recommends:
+      - pipewire-pulseaudio
+      - akmod-v4l2loopback
+      - xdg-desktop-portal
+      - libX11
+      - libXcursor
+      - libXi
+      - libXrender
+      - libxkbcommon-x11
+
+rpm:
+  summary: NVIDIA Broadcast effects as a virtual mic and camera under Wine

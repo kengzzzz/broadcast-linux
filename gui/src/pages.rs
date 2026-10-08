@@ -3,11 +3,12 @@ use broadcast_linux::audio::Kind;
 use broadcast_linux::camera::expand_home;
 use broadcast_linux::config::{Adjustable, CameraConfig, InputFormat, LightPreset, ParallelDecode};
 use broadcast_linux::doctor::Status as Check;
+use broadcast_linux::graph::AudioNode;
 use broadcast_linux::status::State;
 use eframe::egui::{self, RichText};
 
 use crate::app::{App, Page, device_summary};
-use crate::devices::{self, AudioNode};
+use crate::devices;
 use crate::preview::Preview;
 use crate::service;
 use crate::setup_task::SetupTask;
@@ -382,8 +383,9 @@ fn mic(app: &mut App, ui: &mut egui::Ui) {
                 ui.label("Your microphone");
                 node_picker(ui, "mic-input", &mut draft.input, &app.sources, &default_label);
                 if ui.small_button("Refresh").clicked() {
-                    app.sources = devices::audio_nodes(Kind::Mic).unwrap_or_default();
-                    app.default_source = devices::default_node(Kind::Mic);
+                    let devices = devices::query();
+                    app.sources = devices.sources;
+                    app.default_source = devices.default_source;
                 }
             });
             if draft.input == "default" && default_is_us {
@@ -453,11 +455,14 @@ fn mic_default(app: &mut App, ui: &mut egui::Ui) {
             let can = saved_input.as_deref().is_some_and(|i| i != "default") && !default_is_us;
             let button = ui.add_enabled(can, egui::Button::new("Make it the system default"));
             if button.clicked() {
+                // WirePlumber switches the default a moment later, so don't read it back.
                 match devices::make_default_mic() {
-                    Ok(()) => app.note(format!("{name} is now the default input.")),
+                    Ok(()) => {
+                        app.note(format!("{name} is now the default input."));
+                        app.default_source = Some(Kind::Mic.node_name().to_owned());
+                    }
                     Err(e) => app.fail(format!("{e:#}")),
                 }
-                app.default_source = devices::default_node(Kind::Mic);
             }
             if default_is_us {
                 ui.colored_label(theme::GOOD, format!("{name} is the default input."));
@@ -497,7 +502,7 @@ fn speaker(app: &mut App, ui: &mut egui::Ui) {
                     "System default",
                 );
                 if ui.small_button("Refresh").clicked() {
-                    app.sinks = devices::audio_nodes(Kind::Speaker).unwrap_or_default();
+                    app.sinks = devices::query().sinks;
                 }
             });
         });

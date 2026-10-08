@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod download;
 pub mod frames;
 pub mod gpu;
+pub mod graph;
 pub mod mjpeg;
 pub mod nvidia;
 pub mod paths;

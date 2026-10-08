@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use broadcast_linux::audio::Kind;
 use broadcast_linux::config::{self, Config};
 use broadcast_linux::doctor::{self, Report};
+use broadcast_linux::graph::AudioNode;
 use broadcast_linux::paths::Paths;
 use broadcast_linux::status::{Device, State, Status};
 use broadcast_linux::webcam::{self, Webcam};
@@ -15,7 +15,7 @@ use broadcast_linux::{VERSION, gpu, setup, v4l2};
 use eframe::egui;
 
 use crate::config_file::{ChangedOnDisk, ConfigFile};
-use crate::devices::{self, AudioNode};
+use crate::devices;
 use crate::preview::Preview;
 use crate::service::{self, Link};
 use crate::setup_task::{Outcome, SetupTask};
@@ -244,9 +244,10 @@ impl App {
     }
 
     pub fn refresh_devices(&mut self) {
-        self.sources = devices::audio_nodes(Kind::Mic).unwrap_or_default();
-        self.sinks = devices::audio_nodes(Kind::Speaker).unwrap_or_default();
-        self.default_source = devices::default_node(Kind::Mic);
+        let devices = devices::query();
+        self.sources = devices.sources;
+        self.sinks = devices.sinks;
+        self.default_source = devices.default_source;
     }
 
     pub fn refresh_camera(&mut self) {

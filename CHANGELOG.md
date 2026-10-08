@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Tarball: needs glibc 2.35+ (Ubuntu 22.04, Debian 12 and newer) and Wine 10+, down from glibc 2.39 and Wine 11. Distros that ship an older Wine need WineHQ stable.
+- `pactl` is no longer needed: device lists, the default device and `doctor` ask PipeWire directly. `pipewire-pulse` is now optional, and `doctor` warns when it isn't running.
+- `broadcast-linux devices` lists microphones and outputs with the node names the config uses.
+- Packages: `.deb` for Debian 13+, Ubuntu 26.04+ and Linux Mint based on it, and `.rpm` for Fedora, both using the distribution's Wine.
+- One install command for every distribution: `curl -fsSL https://github.com/kengzzzz/broadcast-linux/releases/latest/download/install.sh | bash`. It uses the AUR on Arch, the `.deb` or `.rpm` where they fit, the tarball elsewhere, adds you to the `video` group, and, when the camera module is missing, installs `v4l2loopback-dkms` with kernel headers on Arch and kernel headers on Debian-based systems. Rerunning it upgrades and restarts a running service. It replaces an earlier tarball install, keeping settings and NVIDIA's files.
+- Releases include `SHA256SUMS`, which `install.sh` checks downloads against.
+
 ## 0.4.0 - 2026-10-07
 
 A settings window, plus Eye Contact and Auto Frame for the camera.

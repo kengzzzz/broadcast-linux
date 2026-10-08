@@ -38,8 +38,17 @@ git submodule update --init
 docker build --output type=local,dest=dist .
 ```
 
-The tarball in `dist/` includes `install.sh` and requires glibc 2.39+ on the target
-system. See [installation](../README.md#install) and [CLI setup](cli.md).
+The tarball in `dist/` includes `install.sh` and requires glibc 2.35+ and Wine 10+ on
+the target system. See [installation](../README.md#install) and [CLI setup](cli.md).
+
+To repackage it as a `.deb` and an `.rpm` in `dist/` (uses Docker for
+[nfpm](https://nfpm.goreleaser.com)):
+
+```sh
+ci/release-packages.sh dist
+```
+
+The package contents and dependencies are in [nfpm.yaml](../packaging/nfpm.yaml).
 
 ## Checks and releases
 
@@ -55,6 +64,8 @@ cargo test --locked --workspace
 For a release, align the workspace version in `Cargo.toml`, `Cargo.lock` and both
 `PKGBUILD` files with the `v<version>` tag. Rename `## Unreleased` in
 [CHANGELOG.md](../CHANGELOG.md) to `## <version> - <date>`. That section becomes
-the release notes. Pushing a `v*` tag publishes the tarball after checks pass.
+the release notes. Pushing a `v*` tag builds the tarball, the `.deb` and the `.rpm`,
+installs the packages on Debian 13, Ubuntu 26.04 and Fedora 44, then publishes all three
+with `SHA256SUMS` and the top-level `install.sh`, which picks the right one for the user's distribution.
 
 See [AUR publishing](../packaging/README.md) for publishing the binary package.

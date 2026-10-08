@@ -53,9 +53,43 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  packages:
+    needs: tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+          path: dist
+      - run: ci/release-packages.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+  package-test:
+    needs: packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:13", "ubuntu:26.04", "fedora:44"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - run: bash ci/package-smoke.sh dist
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: tarball
+    needs: package-test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -63,10 +97,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          name: tarball
           path: dist
+          merge-multiple: true
       - run: |
           ci/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          (cd dist && sha256sum *.tar.gz *.deb *.rpm > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.deb dist/*.rpm dist/SHA256SUMS install.sh --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}

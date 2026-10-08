@@ -24,16 +24,28 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 
 ### Linux app
 
-- x86_64 Linux with systemd user services. Release binaries require glibc 2.39+.
-- NVIDIA proprietary Linux driver with CUDA and Vulkan support. Bundled DXVK 3.x requires
-  [driver 575.51.02 or newer](https://github.com/doitsujin/dxvk/wiki/Driver-support)
-- Wine 11+, PipeWire and its client library, WirePlumber, PulseAudio compatibility
-  (`pipewire-pulse`) and `pactl`
-- A Wayland or X11 desktop session. The settings window also needs OpenGL.
-- **Camera:** v4l2loopback 0.12.6+ and access to the video devices (usually the `video` group)
-- Internet access and about 8 GB free disk space during setup
+- Packaged: Arch Linux, Fedora, Debian 13+, Ubuntu 26.04+, and Ubuntu 26.04-based Linux Mint
+- Generic tarball: other x86_64 distributions with systemd and glibc >= 2.35
+- NVIDIA proprietary driver [>= 575.51.02](https://github.com/doitsujin/dxvk/wiki/Driver-support)
+- Wine >= 10
+- PipeWire with WirePlumber, plus `pipewire-pulse` for apps that use PulseAudio
+- Wayland or X11 desktop session with OpenGL
+- 8 GB free disk space and internet access during setup
+- The virtual camera requires v4l2loopback >= 0.12.6 and your user in the `video` group
 
 ## Install
+
+On any supported distribution, as your normal user:
+
+```sh
+curl -fsSL https://github.com/kengzzzz/broadcast-linux/releases/latest/download/install.sh | bash
+```
+
+It uses the AUR package on Arch, the `.deb` on Debian, Ubuntu and Mint, the `.rpm` on
+Fedora, and the tarball elsewhere. It also sets up the virtual camera and asks for `sudo`
+when needed. Run it again to upgrade. Your settings are kept.
+
+To install by hand instead:
 
 **Arch Linux (AUR):**
 
@@ -41,9 +53,36 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 paru -S broadcast-linux-bin
 ```
 
+For the virtual camera, also install `v4l2loopback-dkms` and your kernel's headers
+(`linux-headers` for the default kernel), unless your kernel already has the module.
+
+**Debian, Ubuntu and Linux Mint:** download the `.deb` from the
+[latest release](https://github.com/kengzzzz/broadcast-linux/releases/latest), then:
+
+```sh
+sudo apt install ./broadcast-linux_*_amd64.deb
+```
+
+Debian doesn't install kernel headers by default, and the camera module needs them to build.
+Install `linux-headers-amd64` too. Ubuntu usually has them already.
+
+**Fedora:** enable [RPM Fusion](https://rpmfusion.org/Configuration) first, so the virtual
+camera's module (`akmod-v4l2loopback`) installs with the package. Download the `.rpm` from
+the [latest release](https://github.com/kengzzzz/broadcast-linux/releases/latest), then:
+
+```sh
+sudo dnf install ./broadcast-linux-*.x86_64.rpm
+```
+
 **Other distributions:** install the requirements above, download and unpack the
 [release tarball](https://github.com/kengzzzz/broadcast-linux/releases), then run
 `./install.sh` inside it. It installs to `~/.local`. Add `~/.local/bin` to your `PATH`.
+
+For the virtual camera, add yourself to the `video` group, then log out and back in:
+
+```sh
+sudo usermod -aG video "$USER"
+```
 
 ## Get started
 

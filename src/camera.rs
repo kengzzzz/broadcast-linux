@@ -297,20 +297,21 @@ impl CameraLoop {
     }
 
     fn poll(&self, wait: Duration) {
-        let mut fds = vec![libc::pollfd {
-            fd: self.loopback.fd(),
-            events: libc::POLLPRI,
-            revents: 0,
-        }];
-        if let Some(session) = &self.session {
-            fds.push(libc::pollfd {
-                fd: session.tokens.as_raw_fd(),
+        let mut fds = [
+            libc::pollfd {
+                fd: self.loopback.fd(),
+                events: libc::POLLPRI,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.session.as_ref().map_or(-1, |s| s.tokens.as_raw_fd()),
                 events: libc::POLLIN,
                 revents: 0,
-            });
-        }
+            },
+        ];
         let timeout = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
-        // SAFETY: `fds` is a valid array of pollfd for the duration of the call.
+        // SAFETY: `fds` is a valid array of pollfd for the duration of the call; poll
+        // ignores entries with a negative fd.
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
     }
 
@@ -566,16 +567,17 @@ impl CameraLoop {
                     return;
                 }
                 Ok(n) => {
-                    let slots: Vec<usize> = tokens[..n].iter().map(|&k| usize::from(k)).collect();
-                    if slots.iter().any(|&k| k >= SLOTS) {
+                    let slots = &tokens[..n];
+                    if slots.iter().any(|&k| usize::from(k) >= SLOTS) {
                         eprintln!("camera: the worker sent a bad frame slot");
                         self.stop();
                         return;
                     }
                     // Show only the newest finished frame and hand older ones straight back.
                     let (&newest, older) = slots.split_last().unwrap_or((&0, &[]));
+                    let newest = usize::from(newest);
                     for &k in older {
-                        let _ = session.free.send(k);
+                        let _ = session.free.send(usize::from(k));
                     }
                     if !session.live {
                         session.live = true;

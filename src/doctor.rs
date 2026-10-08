@@ -4,9 +4,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::audio::{self, Kind};
+use crate::audio::Kind;
 use crate::camera::expand_home;
 use crate::config::{CameraConfig, Config};
+use crate::graph::Graph;
 use crate::nvidia::Installation;
 use crate::paths::{self, Paths};
 use crate::{gpu, prefix, setup, v4l2, webcam, worker};
@@ -155,7 +156,8 @@ pub fn check(paths: &Paths) -> Report {
     report("wine prefix", prefix(paths));
     report("workers", workers());
     report("display", display());
-    report("pipewire", pipewire());
+    let graph = Graph::query();
+    report("pipewire", pipewire(&graph));
     let service = service();
     let running = service.is_ok();
     report("service", service);
@@ -188,10 +190,10 @@ pub fn check(paths: &Paths) -> Report {
         ),
     ] {
         let name = kind.label();
-        if enabled {
-            report(name, audio_device(kind, target, running));
-        } else {
-            report(name, skip("disabled in config"));
+        match &graph {
+            _ if !enabled => report(name, skip("disabled in config")),
+            Ok(graph) => report(name, audio_device(graph, kind, target, running)),
+            Err(_) => report(name, skip("PipeWire did not answer")),
         }
     }
     if config.camera.enabled {
@@ -235,9 +237,9 @@ fn gpu_check() -> Check {
 fn wine() -> Check {
     let version = output("wine", &["--version"])?;
     match wine_major(&version) {
-        Some(major) if major >= 11 => Ok(version),
+        Some(major) if major >= 10 => Ok(version),
         _ => Err(Problem::fail(format!(
-            "{version}; Wine 11 or newer is required"
+            "{version}; Wine 10 or newer is required (WineHQ stable if your distro's is older)"
         ))),
     }
 }
@@ -294,17 +296,27 @@ fn display() -> Check {
     Ok(names.join(" "))
 }
 
-fn pipewire() -> Check {
-    let info = output("pactl", &["info"])?;
-    let server = info
-        .lines()
-        .find_map(|l| l.strip_prefix("Server Name: "))
-        .unwrap_or("unknown server")
-        .to_owned();
+fn pipewire(graph: &Result<Graph>) -> Check {
+    let graph = graph
+        .as_ref()
+        .map_err(|e| Problem::fail(format!("{e:#}")))?;
+    let server = format!("PipeWire {}", graph.version);
     if output("systemctl", &["--user", "is-active", "wireplumber"]).is_err() {
         return Err(Problem::warn(
             format!("{server}; WirePlumber is not running"),
             &["systemctl --user enable --now wireplumber"],
+        ));
+    }
+    let pulse = [
+        "--user",
+        "is-active",
+        "pipewire-pulse.socket",
+        "pipewire-pulse.service",
+    ];
+    if output("systemctl", &pulse).is_err() {
+        return Err(Problem::warn(
+            format!("{server}; pipewire-pulse is not running, so most apps can't see the devices"),
+            &["systemctl --user enable --now pipewire-pulse.socket"],
         ));
     }
     Ok(format!("{server}, WirePlumber running"))
@@ -321,39 +333,21 @@ fn service() -> Check {
         })
 }
 
-fn audio_device(kind: Kind, target: &str, running: bool) -> Check {
-    let name = audio::resolve_target(kind, target)?;
-    let (list, class) = match kind {
-        Kind::Mic => ("sources", "source"),
-        Kind::Speaker => ("sinks", "sink"),
-    };
-    let devices = output("pactl", &["list", "short", list])?;
-    if !devices
-        .lines()
-        .any(|l| l.split('\t').nth(1) == Some(name.as_str()))
-    {
+fn audio_device(graph: &Graph, kind: Kind, target: &str, running: bool) -> Check {
+    let name = graph.resolve(kind, target)?;
+    let Some(node) = graph.find(kind, &name) else {
         return Err(Problem::fail(format!(
-            "{name} not found; see `pactl list short {list}`"
+            "{name} not found; see `wpctl status`"
         )));
-    }
-    let mut muted = vec![name.as_str()];
-    if running {
-        muted.push(kind.node_name());
-    }
-    muted.retain(|node| {
-        output("pactl", &[&format!("get-{class}-mute"), node]).is_ok_and(|o| is_muted(&o))
-    });
-    if let Some(node) = muted.first() {
+    };
+    let ours = graph.find(kind, kind.node_name()).filter(|_| running);
+    if let Some(muted) = [Some(node), ours].into_iter().flatten().find(|n| n.muted) {
         return Err(Problem::warn(
-            format!("{node} is muted"),
-            &[&format!("pactl set-{class}-mute {node} 0")],
+            format!("{} is muted", muted.name),
+            &[&format!("wpctl set-mute {} 0", muted.id)],
         ));
     }
     Ok(name)
-}
-
-fn is_muted(pactl: &str) -> bool {
-    pactl.trim() == "Mute: yes"
 }
 
 fn loopback(camera: &CameraConfig) -> Check {
@@ -392,13 +386,8 @@ mod tests {
     fn parses_wine_versions() {
         assert_eq!(wine_major("wine-11.19"), Some(11));
         assert_eq!(wine_major("wine-11.0 (Staging)"), Some(11));
+        assert_eq!(wine_major("wine-10.0 (Debian 10.0~repack-6)"), Some(10));
         assert_eq!(wine_major("wine-9.22"), Some(9));
         assert_eq!(wine_major("garbage"), None);
-    }
-
-    #[test]
-    fn parses_mute() {
-        assert!(is_muted("Mute: yes\n"));
-        assert!(!is_muted("Mute: no"));
     }
 }

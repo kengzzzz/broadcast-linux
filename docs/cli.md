@@ -70,6 +70,7 @@ select **NVIDIA Broadcast Speaker** as the call app's output.
 | Restart or use an updated binary | `systemctl --user restart broadcast-linux` |
 | Disable automatic startup | `systemctl --user disable --now broadcast-linux` |
 | Check setup | `broadcast-linux doctor` |
+| List microphones and outputs | `broadcast-linux devices` |
 | Read this boot's logs | `journalctl --user -u broadcast-linux -b` |
 
 [Configuration](configuration.md#apply-manual-edits) explains which changes need
