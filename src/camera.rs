@@ -15,7 +15,7 @@ use image::{DynamicImage, ImageDecoder, ImageReader};
 use sha2::{Digest, Sha256};
 
 use crate::config::CameraConfig;
-use crate::frames::{Decoder, Layout, SLOTS, SharedFrames};
+use crate::frames::{Decoder, Layout, SharedFrames};
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
 use crate::status::{self, State};
@@ -69,7 +69,8 @@ impl Camera {
             let mut camera = CameraLoop::new(paths, config, idle_timeout, loopback, receiver);
             camera.status = shared;
             camera.notify = notify;
-            if let Err(e) = camera.loopback.write_frame(&camera.placeholder) {
+            // SAFETY: no session runs yet, so nothing else writes the loopback's buffers.
+            if let Err(e) = unsafe { camera.loopback.write_frame(&camera.placeholder) } {
                 eprintln!("camera: writing the first placeholder frame: {e}");
             }
             let _ = ready_tx.send(Ok(()));
@@ -109,6 +110,9 @@ struct Session {
     _feed: Feed,
     frames: Arc<SharedFrames>,
     free: Sender<usize>,
+    /// With mapped loopback buffers, the slot on screen (`Loopback::shown`) stays out of
+    /// circulation until a newer frame is queued, so the feed and worker never write it.
+    hold_shown: bool,
     live: bool,
 }
 
@@ -251,7 +255,15 @@ impl CameraLoop {
 
             let live = self.session.as_ref().is_some_and(|s| s.live);
             if !live && Instant::now() >= next_placeholder {
-                let _ = self.loopback.write_frame(&self.placeholder);
+                // While loading, re-show the held buffer, which start() filled with the
+                // placeholder.
+                let _ = if self.session.as_ref().is_some_and(|s| s.hold_shown) {
+                    self.loopback.queue(self.loopback.shown())
+                } else {
+                    // SAFETY: a session that uses mapped buffers takes the branch above, so
+                    // nothing else is writing them here.
+                    unsafe { self.loopback.write_frame(&self.placeholder) }
+                };
                 next_placeholder = Instant::now() + PLACEHOLDER_INTERVAL;
             }
 
@@ -375,6 +387,9 @@ impl CameraLoop {
         if self.session.is_some() {
             return;
         }
+        // The session holds the buffer shown now, so it must not be a stale effect frame.
+        // SAFETY: no session runs, so nothing else writes the loopback's buffers.
+        let _ = unsafe { self.loopback.write_frame(&self.placeholder) };
         match self.start_session() {
             Ok(session) => {
                 eprintln!(
@@ -433,18 +448,23 @@ impl CameraLoop {
         };
         let effects = self.config.has_effects();
         let in_bytes = if effects { decoder.worker_bytes() } else { 0 };
-        let frames = Arc::new(SharedFrames::new(in_bytes, self.placeholder.len())?);
+        let frames = Arc::new(SharedFrames::new(
+            in_bytes,
+            self.placeholder.len(),
+            self.loopback.buffers(),
+        )?);
         let (tokens_in, tokens_out) = io::pipe()?;
         let (worker, tokens) = if effects {
             let (worker, stdout) =
-                self.spawn_worker(Stdio::from(tokens_in), decoder.layout(), &frames.path())?;
+                self.spawn_worker(Stdio::from(tokens_in), decoder.layout(), &frames)?;
             (Some(worker), File::from(OwnedFd::from(stdout)))
         } else {
             (None, File::from(OwnedFd::from(tokens_in)))
         };
         set_nonblocking(tokens.as_raw_fd())?;
+        let hold_shown = frames.loopback().is_some();
         let (free, free_slots) = mpsc::channel();
-        for k in 0..SLOTS {
+        for k in (0..frames.slots()).filter(|&k| !hold_shown || k != self.loopback.shown()) {
             let _ = free.send(k);
         }
         let feed = Feed::start(
@@ -461,6 +481,7 @@ impl CameraLoop {
             _feed: feed,
             frames,
             free,
+            hold_shown,
             live: false,
         })
     }
@@ -469,7 +490,7 @@ impl CameraLoop {
         &self,
         tokens: Stdio,
         layout: Layout,
-        frames: &str,
+        frames: &SharedFrames,
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
         let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
@@ -480,8 +501,17 @@ impl CameraLoop {
             "--input".into(),
             layout.worker_name().into(),
             "--shm".into(),
-            frames.into(),
+            frames.path().context("no shared frames for the worker")?,
         ];
+        if let Some(buffers) = frames.loopback() {
+            let offsets: Vec<String> = buffers.offsets().iter().map(u32::to_string).collect();
+            args.extend([
+                "--out-device".into(),
+                buffers.path().into(),
+                "--out-offsets".into(),
+                offsets.join(","),
+            ]);
+        }
         if self.config.video_noise_removal.enabled {
             let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
             args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
@@ -568,7 +598,10 @@ impl CameraLoop {
                 }
                 Ok(n) => {
                     let slots = &tokens[..n];
-                    if slots.iter().any(|&k| usize::from(k) >= SLOTS) {
+                    let held = session.hold_shown.then(|| self.loopback.shown());
+                    if slots.iter().any(|&k| {
+                        usize::from(k) >= session.frames.slots() || Some(usize::from(k)) == held
+                    }) {
                         eprintln!("camera: the worker sent a bad frame slot");
                         self.stop();
                         return;
@@ -585,11 +618,19 @@ impl CameraLoop {
                         self.error = None;
                         eprintln!("camera: effect running");
                     }
-                    // SAFETY: the token gives this thread slot `newest` until it is sent back.
-                    let _ = self
-                        .loopback
-                        .write_frame(unsafe { session.frames.output(newest) });
-                    let _ = session.free.send(newest);
+                    if let Some(shown) = held {
+                        let freed = if self.loopback.queue(newest).is_ok() {
+                            shown
+                        } else {
+                            newest
+                        };
+                        let _ = session.free.send(freed);
+                    } else {
+                        // SAFETY: the token gives this thread slot `newest` until it is sent
+                        // back, and without mapped buffers write_frame() only copies.
+                        let _ = unsafe { self.loopback.write_frame(session.frames.output(newest)) };
+                        let _ = session.free.send(newest);
+                    }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}

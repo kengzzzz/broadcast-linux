@@ -1,7 +1,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr::NonNull;
-
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +9,7 @@ use turbojpeg::{Decompressor, Subsamp, YuvImage};
 
 use crate::config::ParallelDecode;
 use crate::mjpeg;
+use crate::v4l2::Buffers;
 use crate::webcam::Format;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,93 +53,140 @@ impl Layout {
 
 pub const SLOTS: usize = 2;
 
-/// Shared memory holding `SLOTS` input frames, then `SLOTS` output frames. Pipes pass
-/// one-byte slot numbers, and whoever holds a slot's number is the only one using it.
+/// Frame slots shared with the worker. Pipes pass one-byte slot numbers, and whoever holds
+/// a slot's number is the only one using it. Output slots are the loopback's own buffers
+/// when those are mapped; otherwise they follow the input slots in the memfd.
 pub struct SharedFrames {
-    fd: OwnedFd,
-    ptr: NonNull<u8>,
+    memfd: Option<(OwnedFd, NonNull<u8>)>,
+    slots: usize,
     in_bytes: usize,
     out_bytes: usize,
+    loopback: Option<Arc<Buffers>>,
 }
 
-// SAFETY: the mapping is only reached through slots, which the token protocol gives to one
-// thread or process at a time.
+// SAFETY: the mappings are only reached through slots, which the token protocol gives to
+// one thread or process at a time.
 unsafe impl Send for SharedFrames {}
 // SAFETY: as above.
 unsafe impl Sync for SharedFrames {}
 
 impl SharedFrames {
-    pub fn new(in_bytes: usize, out_bytes: usize) -> Result<Self> {
-        // SAFETY: plain syscall with a NUL-terminated name.
-        let raw =
-            unsafe { libc::memfd_create(c"broadcast-linux-frames".as_ptr(), libc::MFD_CLOEXEC) };
-        if raw < 0 {
-            bail!("creating shared frames: {}", io::Error::last_os_error());
-        }
-        // SAFETY: memfd_create returned a new descriptor that nothing else owns.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let len = SLOTS * (in_bytes + out_bytes);
-        // SAFETY: plain syscall on the descriptor owned above.
-        if unsafe { libc::ftruncate(fd.as_raw_fd(), libc::off_t::try_from(len)?) } < 0 {
-            bail!("sizing shared frames: {}", io::Error::last_os_error());
-        }
-        // SAFETY: maps the whole file just sized; unmapped in Drop.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
+    pub fn new(in_bytes: usize, out_bytes: usize, loopback: Option<Arc<Buffers>>) -> Result<Self> {
+        let slots = loopback.as_ref().map_or(SLOTS, |b| b.count());
+        let memfd_out = if loopback.is_some() { 0 } else { out_bytes };
+        let len = slots * (in_bytes + memfd_out);
+        let memfd = if len == 0 {
+            None
+        } else {
+            Some(map_memfd(len)?)
         };
-        if ptr == libc::MAP_FAILED {
-            bail!("mapping shared frames: {}", io::Error::last_os_error());
-        }
         Ok(Self {
-            fd,
-            ptr: NonNull::new(ptr.cast()).context("shared frames mapped at null")?,
+            memfd,
+            slots,
             in_bytes,
-            out_bytes,
+            out_bytes: memfd_out,
+            loopback,
         })
     }
 
-    pub fn path(&self) -> String {
-        format!("/proc/{}/fd/{}", std::process::id(), self.fd.as_raw_fd())
+    pub fn slots(&self) -> usize {
+        self.slots
+    }
+
+    pub fn loopback(&self) -> Option<&Buffers> {
+        self.loopback.as_deref()
+    }
+
+    pub fn path(&self) -> Option<String> {
+        let (fd, _) = self.memfd.as_ref()?;
+        Some(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            fd.as_raw_fd()
+        ))
+    }
+
+    fn len(&self) -> usize {
+        self.slots * (self.in_bytes + self.out_bytes)
+    }
+
+    /// # Safety
+    /// The caller must hold the token of the slot that owns this range.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn memfd_slice(&self, offset: usize, len: usize) -> &mut [u8] {
+        let Some((_, ptr)) = &self.memfd else {
+            return &mut [];
+        };
+        assert!(offset + len <= self.len());
+        // SAFETY: in bounds of the mapping; the token makes this the only reference.
+        unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr().add(offset), len) }
     }
 
     /// # Safety
     /// The caller must hold slot `slot`'s token.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn input(&self, slot: usize) -> &mut [u8] {
-        assert!(slot < SLOTS);
-        // SAFETY: in bounds of the mapping; the token makes this the only reference.
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                self.ptr.as_ptr().add(slot * self.in_bytes),
-                self.in_bytes,
-            )
-        }
+        assert!(slot < self.slots);
+        // SAFETY: the caller holds the slot's token.
+        unsafe { self.memfd_slice(slot * self.in_bytes, self.in_bytes) }
     }
 
     /// # Safety
     /// The caller must hold slot `slot`'s token.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn output(&self, slot: usize) -> &mut [u8] {
-        assert!(slot < SLOTS);
-        let offset = SLOTS * self.in_bytes + slot * self.out_bytes;
-        // SAFETY: in bounds of the mapping; the token makes this the only reference.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), self.out_bytes) }
+        assert!(slot < self.slots);
+        if let Some(buffers) = &self.loopback {
+            // SAFETY: the token makes this the only user of the buffer.
+            return unsafe { buffers.frame(slot) };
+        }
+        // SAFETY: the caller holds the slot's token.
+        unsafe {
+            self.memfd_slice(
+                self.slots * self.in_bytes + slot * self.out_bytes,
+                self.out_bytes,
+            )
+        }
     }
 }
 
 impl Drop for SharedFrames {
     fn drop(&mut self) {
-        let len = SLOTS * (self.in_bytes + self.out_bytes);
-        // SAFETY: unmaps the region mapped in new(); no slot references outlive self.
-        unsafe { libc::munmap(self.ptr.as_ptr().cast(), len) };
+        if let Some((_, ptr)) = &self.memfd {
+            // SAFETY: unmaps the region mapped in new(); no slot references outlive self.
+            unsafe { libc::munmap(ptr.as_ptr().cast(), self.len()) };
+        }
     }
+}
+
+fn map_memfd(len: usize) -> Result<(OwnedFd, NonNull<u8>)> {
+    // SAFETY: plain syscall with a NUL-terminated name.
+    let raw = unsafe { libc::memfd_create(c"broadcast-linux-frames".as_ptr(), libc::MFD_CLOEXEC) };
+    if raw < 0 {
+        bail!("creating shared frames: {}", io::Error::last_os_error());
+    }
+    // SAFETY: memfd_create returned a new descriptor that nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: plain syscall on the descriptor owned above.
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), libc::off_t::try_from(len)?) } < 0 {
+        bail!("sizing shared frames: {}", io::Error::last_os_error());
+    }
+    // SAFETY: maps the whole file just sized; unmapped in Drop.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd.as_raw_fd(),
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        bail!("mapping shared frames: {}", io::Error::last_os_error());
+    }
+    let ptr = NonNull::new(ptr.cast()).context("shared frames mapped at null")?;
+    Ok((fd, ptr))
 }
 
 pub struct Decoder {

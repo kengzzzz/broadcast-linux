@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-- Tarball: needs glibc 2.35+ (Ubuntu 22.04, Debian 12 and newer) and Wine 10+, down from glibc 2.39 and Wine 11. Distros that ship an older Wine need WineHQ stable.
+- Install: one command for every distribution: `curl -fsSL https://github.com/kengzzzz/broadcast-linux/releases/latest/download/install.sh | bash`. It uses the AUR on Arch, the `.deb` or `.rpm` where they fit, and the tarball elsewhere.
+- Install: adds you to the `video` group. On Arch and Debian-based systems, it also installs the camera module and kernel headers when the module is missing.
+- Install: rerunning it upgrades and restarts a running service. It replaces an earlier tarball install and keeps your settings and NVIDIA's files.
+- Install: downloads are checked against the release's new `SHA256SUMS`.
+- Packages: `.deb` for Debian 13+, Ubuntu 26.04+ and Linux Mint based on it, and `.rpm` for Fedora. Both use the distribution's Wine.
+- Tarball: needs glibc 2.35+ and Wine 10+ (was glibc 2.39 and Wine 11), so it runs on Ubuntu 22.04, Debian 12 and newer. Distributions with an older Wine need WineHQ stable.
 - `pactl` is no longer needed: device lists, the default device and `doctor` ask PipeWire directly. `pipewire-pulse` is now optional, and `doctor` warns when it isn't running.
-- `broadcast-linux devices` lists microphones and outputs with the node names the config uses.
-- Packages: `.deb` for Debian 13+, Ubuntu 26.04+ and Linux Mint based on it, and `.rpm` for Fedora, both using the distribution's Wine.
-- One install command for every distribution: `curl -fsSL https://github.com/kengzzzz/broadcast-linux/releases/latest/download/install.sh | bash`. It uses the AUR on Arch, the `.deb` or `.rpm` where they fit, the tarball elsewhere, adds you to the `video` group, and, when the camera module is missing, installs `v4l2loopback-dkms` with kernel headers on Arch and kernel headers on Debian-based systems. Rerunning it upgrades and restarts a running service. It replaces an earlier tarball install, keeping settings and NVIDIA's files.
-- Releases include `SHA256SUMS`, which `install.sh` checks downloads against.
+- New `broadcast-linux devices`: lists microphones and outputs with the node names the config uses.
+- Camera: effect frames go straight into the virtual camera, one copy fewer per frame. Needs v4l2loopback 0.14+ with `max_buffers=3` or more. The module config now sets it, and it applies after a reboot or module reload. Otherwise frames are copied as before.
 
 ## 0.4.0 - 2026-10-07
 

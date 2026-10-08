@@ -11,7 +11,7 @@
 
 #define DEGREES (3.14159265f / 180.0f)
 #define CU_CTX_SCHED_BLOCKING_SYNC 0x04
-#define SLOTS 2
+#define MAX_SLOTS 3
 
 typedef int (WINAPI *create_fn)(const char *, NvVFX_Handle *);
 typedef void (WINAPI *destroy_fn)(NvVFX_Handle);
@@ -242,7 +242,8 @@ static const struct input_format {
 
 static void usage(void) {
     fprintf(stderr,
-            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT] [--shm FILE]\n"
+            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT]\n"
+            "           [--shm FILE [--out-device DEVICE --out-offsets OFFSET,...]]\n"
             "           [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
             "           [--eye-contact GAZE_MODEL_DIR] [--auto-frame FACE_MODEL_DIR]\n"
             "           [--background FILE.bgr | --blur 0..1 | --remove-background]\n"
@@ -251,13 +252,18 @@ static void usage(void) {
             "FORMAT is bgr24 (default), yuyv, nv12, or planar full-range j420, j422 or j444.\n"
             "With --shm, FILE holds 2 input frames then 2 output frames, and stdin and stdout carry\n"
             "one byte per frame: the slot to process, then the slot that is done.\n"
+            "With --out-device, output frames are the v4l2loopback buffers mapped from DEVICE at\n"
+            "each OFFSET (up to 3), FILE holds only input frames, and there is one slot per buffer.\n"
             "The background is BGR24 at --size; output frames are YUYV (BT.601, limited range).\n"
             "Removal fills the background black.\n");
 }
 
 int main(int argc, char **argv) {
     const char *gs_dir = NULL, *background_path = NULL, *relight_dir = NULL, *hdr_path = NULL,
-               *denoise_dir = NULL, *shm_path = NULL, *gaze_dir = NULL, *frame_dir = NULL;
+               *denoise_dir = NULL, *shm_path = NULL, *gaze_dir = NULL, *frame_dir = NULL,
+               *out_device = NULL;
+    unsigned long out_offsets[MAX_SLOTS];
+    int out_count = 0;
     float strength = 1, denoise_strength = 1;
     float blur_strength = 0.5f;
     int blur_enabled = 0, remove_background = 0;
@@ -285,6 +291,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--auto-frame") && next) frame_dir = argv[++i];
         else if (!strcmp(a, "--size") && next && sscanf(argv[++i], "%ux%u", &width, &height) == 2) {}
         else if (!strcmp(a, "--shm") && next) shm_path = argv[++i];
+        else if (!strcmp(a, "--out-device") && next) out_device = argv[++i];
+        else if (!strcmp(a, "--out-offsets") && next) {
+            char *p = argv[++i], *end = p;
+            for (out_count = 0; out_count < MAX_SLOTS; p = end + 1) {
+                out_offsets[out_count++] = strtoul(p, &end, 10);
+                if (end == p || *end != ',') break;
+            }
+            if (end == p || *end) {
+                usage();
+                return 2;
+            }
+        }
         else if (!strcmp(a, "--input") && next) {
             const char *name = argv[++i];
             input = NULL;
@@ -302,7 +320,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!gs_dir || !width || !height || width % 2 || (input->bits_per_pixel == 12 && height % 2) ||
-        !relight_dir != !hdr_path) {
+        !relight_dir != !hdr_path || !out_device != !out_count || (out_device && !shm_path)) {
         usage();
         return 2;
     }
@@ -310,6 +328,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Use only one of --background, --blur or --remove-background\n");
         return 2;
     }
+    const int slots = out_device ? out_count : 2;
     /* NVIDIA's filter still blurs at strength zero; make zero a true passthrough. */
     if (blur_strength == 0) blur_enabled = 0;
 
@@ -404,14 +423,14 @@ int main(int argc, char **argv) {
                  in_bytes = (size_t)width * height * input->bits_per_pixel / 8;
     const int need_mask = background_path || blur_enabled || remove_background || relight_dir;
     CUstream stream = NULL;
-    NvCVImage src_slots[SLOTS] = {{0}}, out_slots[SLOTS] = {{0}};
+    NvCVImage src_slots[MAX_SLOTS] = {{0}}, out_slots[MAX_SLOTS] = {{0}};
     NvCVImage src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
               hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0},
               dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, gaze_out = {0}, framed = {0}, tmp = {0};
     float *hdr_pixels = NULL;
-    uint8_t *shm = MAP_FAILED;
-    const size_t shm_bytes = SLOTS * (in_bytes + out_bytes);
-    int status = 0, pinned = 0;
+    uint8_t *shm = MAP_FAILED, *out_maps[MAX_SLOTS];
+    const size_t shm_bytes = slots * (in_bytes + (out_device ? 0 : out_bytes));
+    int status = 0, pinned = 0, out_pinned[MAX_SLOTS] = {0}, mapped_outs = 0;
 
     CHECK("CreateStream", stream_create(&stream));
     if (shm_path) {
@@ -426,15 +445,33 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
         pinned = pin_host(shm, shm_bytes, 1) == 0;
-        if (!pinned)
+        if (out_device) {
+            fd = open(out_device, O_RDWR);
+            for (; fd >= 0 && mapped_outs < slots; mapped_outs++) {
+                out_maps[mapped_outs] = mmap(NULL, out_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                                             (off_t)out_offsets[mapped_outs]);
+                if (out_maps[mapped_outs] == MAP_FAILED) break;
+                out_pinned[mapped_outs] = pin_host(out_maps[mapped_outs], out_bytes, 1) == 0;
+            }
+            if (fd >= 0) close(fd);
+            if (mapped_outs < slots) {
+                fprintf(stderr, "Could not map the buffers of %s\n", out_device);
+                status = 1;
+                goto cleanup;
+            }
+        }
+        int all_pinned = pinned;
+        for (int k = 0; k < mapped_outs; k++) all_pinned &= out_pinned[k];
+        if (!all_pinned)
             fprintf(stderr, "Could not pin shared frames; transfers will be slower\n");
-        const unsigned mem = pinned ? NVCV_CPU_PINNED : NVCV_CPU;
-        for (int k = 0; k < SLOTS; k++) {
+        for (int k = 0; k < slots; k++) {
+            uint8_t *out = out_device ? out_maps[k] : shm + slots * in_bytes + k * out_bytes;
+            const int out_is_pinned = out_device ? out_pinned[k] : pinned;
             CHECK("Init src slot", image_init(&src_slots[k], width, height, (int)(width * input->row_bytes_per_pixel),
-                                              shm + k * in_bytes, input->format, NVCV_U8, input->layout, mem));
-            CHECK("Init out slot", image_init(&out_slots[k], width, height, (int)(width * 2),
-                                              shm + SLOTS * in_bytes + k * out_bytes, NVCV_YUV422, NVCV_U8, NVCV_YUYV,
-                                              mem));
+                                              shm + k * in_bytes, input->format, NVCV_U8, input->layout,
+                                              pinned ? NVCV_CPU_PINNED : NVCV_CPU));
+            CHECK("Init out slot", image_init(&out_slots[k], width, height, (int)(width * 2), out, NVCV_YUV422,
+                                              NVCV_U8, NVCV_YUYV, out_is_pinned ? NVCV_CPU_PINNED : NVCV_CPU));
         }
     } else {
         if (image_alloc(&src_slots[0], width, height, input->format, NVCV_U8, input->layout, NVCV_CPU_PINNED, 1))
@@ -449,7 +486,7 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
     }
-    for (int k = 0; k < SLOTS; k++) {
+    for (int k = 0; k < slots; k++) {
         src_slots[k].colorspace = (unsigned char)input->colorspace;
         out_slots[k].colorspace = NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL;
     }
@@ -589,7 +626,7 @@ int main(int argc, char **argv) {
         if (shm != MAP_FAILED) {
             k = getchar();
             if (k == EOF) break;
-            if (k >= SLOTS) {
+            if (k >= slots) {
                 fprintf(stderr, "Bad frame slot %d\n", k);
                 status = 1;
                 goto cleanup;
@@ -677,7 +714,7 @@ cleanup:
                                &framed, &tmp};
         for (size_t i = 0; i < sizeof images / sizeof *images; i++)
             if (images[i]->pixels) image_free(images[i]);
-        for (int k = 0; k < SLOTS; k++) {
+        for (int k = 0; k < slots; k++) {
             if (src_slots[k].deletePtr) image_free(&src_slots[k]);
             if (out_slots[k].deletePtr) image_free(&out_slots[k]);
         }
@@ -685,6 +722,10 @@ cleanup:
     if (shm != MAP_FAILED) {
         if (pinned) pin_host(shm, shm_bytes, 0);
         munmap(shm, shm_bytes);
+    }
+    for (int k = 0; k < mapped_outs; k++) {
+        if (out_pinned[k]) pin_host(out_maps[k], out_bytes, 0);
+        munmap(out_maps[k], out_bytes);
     }
     if (state) free_state(gs, state);
     if (gs) destroy(gs);
