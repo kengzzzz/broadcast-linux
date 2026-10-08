@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 - 2026-10-08
+
+One install command for every distribution, plus `.deb` and `.rpm` packages.
 
 - Install: one command for every distribution: `curl -fsSL https://github.com/kengzzzz/broadcast-linux/releases/latest/download/install.sh | bash`. It uses the AUR on Arch, the `.deb` or `.rpm` where they fit, and the tarball elsewhere.
 - Install: adds you to the `video` group. On Arch and Debian-based systems, it also installs the camera module and kernel headers when the module is missing.
