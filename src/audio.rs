@@ -31,7 +31,7 @@ const LATENCY: &str = "960/48000";
 const MAX_IN_FLIGHT: u64 = 2;
 /// Capacity of the frame rings.
 const QUEUE: usize = 32;
-/// Output off schedule by more than this holds or skips up to n / SLIP_RATE samples
+/// Output off schedule by more than this holds or skips up to n / `SLIP_RATE` samples
 /// per period until it is back on.
 const SLIP: i64 = 24;
 const SLIP_RATE: usize = 64;
@@ -299,11 +299,57 @@ impl Playback {
             return;
         }
         let valid = rt.clock_valid.load(Ordering::Acquire) && now != 0;
-        let clock = rt.clock.read().filter(|_| valid);
-        let (Some(ring), Some((start, end, captured))) = (self.ring.as_mut(), clock) else {
+        let Some((start, end, captured)) = rt.clock.read().filter(|_| valid) else {
             out.fill([0; 4]);
             return;
         };
+        if self.ring.is_none() {
+            out.fill([0; 4]);
+            return;
+        }
+        self.track_period(n);
+        let period_ns = signed(self.period) * 1_000_000_000 / i64::from(RATE);
+        if captured == now {
+            rt.locked_at.store(now, Ordering::Relaxed);
+        }
+        // Capture's input index this period. Sample counts, since graph time jumps when
+        // the period or driver changes. Graph time is the fallback across drivers.
+        let reference = if captured == now {
+            index(start)
+        } else if now - rt.locked_at.load(Ordering::Relaxed) <= 4 * period_ns {
+            index(end)
+        } else {
+            index(start) + ns_to_samples(now - captured)
+        };
+        // Frames only become playable at period boundaries, so a partial period would
+        // add delay but no worker time.
+        let reserve = self.period * self.reserve.div_ceil(self.period).max(1);
+        let target = reference - signed(self.frame + reserve);
+        // Gaps only count while capture delivers and an app is linked.
+        let live = now - captured <= 3 * period_ns && rt.linked.load(Ordering::Relaxed);
+        let flowing = rt.stats.flowing.load(Ordering::Relaxed);
+        let counting = flowing && live;
+
+        let correcting = (self.next.unwrap_or(target) - target).abs() > SLIP;
+        let (q, held, skipped) = self.correct(out, target, reserve, counting, rt);
+        let (q, late, missing, played) = self.copy(out, held, q);
+        let late = late.saturating_sub(skipped);
+        if counting {
+            rt.stats
+                .underrun_samples
+                .fetch_add(missing as u64, Ordering::Relaxed);
+            rt.stats
+                .late_samples
+                .fetch_add(late as u64, Ordering::Relaxed);
+            self.adapt_reserve(reserve, late > 0, correcting, n);
+        } else if played && !flowing {
+            rt.stats.flowing.store(true, Ordering::Relaxed);
+        }
+        self.last = f32::from_le_bytes(out[n - 1]);
+        self.next = Some(q);
+    }
+
+    fn track_period(&mut self, n: usize) {
         if n >= self.period {
             self.period = n;
             self.shorter_for = 0;
@@ -314,83 +360,74 @@ impl Playback {
                 self.shorter_for = 0;
             }
         }
-        let period_ns = self.period as i64 * 1_000_000_000 / i64::from(RATE);
-        if captured == now {
-            rt.locked_at.store(now, Ordering::Relaxed);
-        }
-        // Capture's input index this period. Sample counts, since graph time jumps when
-        // the period or driver changes. Graph time is the fallback across drivers.
-        #[expect(clippy::cast_possible_truncation, reason = "sample indices fit in i64")]
-        let reference = if captured == now {
-            start as i64
-        } else if now - rt.locked_at.load(Ordering::Relaxed) <= 4 * period_ns {
-            end as i64
-        } else {
-            start as i64 + ((now - captured) as f64 * f64::from(RATE) / 1e9).round() as i64
-        };
-        // Frames only become playable at period boundaries, so a partial period would
-        // add delay but no worker time.
-        let reserve = self.period * self.reserve.div_ceil(self.period).max(1);
-        let target = reference - (self.frame + reserve) as i64;
-        // Gaps only count while capture delivers and an app is linked.
-        let live = now - captured <= 3 * period_ns && rt.linked.load(Ordering::Relaxed);
-        let flowing = rt.stats.flowing.load(Ordering::Relaxed);
-        let counting = flowing && live;
+    }
+
+    /// Returns where to read from, and how many samples were held at the start of
+    /// `out` or skipped on purpose to get back on schedule.
+    fn correct(
+        &mut self,
+        out: &mut [[u8; 4]],
+        target: i64,
+        reserve: usize,
+        counting: bool,
+        rt: &Rt,
+    ) -> (i64, usize, usize) {
         let mut q = self.next.unwrap_or(target);
         let ahead = q - target;
-        // Skipped on purpose, so not late.
-        let mut skipped = 0;
-        let mut i = 0;
         // Two periods in a row, since one can be off at a driver switch.
-        if ahead > reserve as i64 || ahead < -JUMP_BEHIND {
+        if ahead > signed(reserve) || ahead < -JUMP_BEHIND {
             self.off += 1;
             if self.off > 1 {
                 if counting {
                     rt.stats.resyncs.fetch_add(1, Ordering::Relaxed);
                 }
-                skipped = usize::try_from(-ahead).unwrap_or(0);
-                q = target;
                 self.off = 0;
+                return (target, 0, count(-ahead));
             }
-        } else {
-            self.off = 0;
-            let slip = (ahead.unsigned_abs() as usize).min((n / SLIP_RATE).max(1));
-            if ahead > SLIP {
-                out[..slip].fill(self.last.to_le_bytes());
-                i = slip;
-            } else if ahead < -SLIP {
-                q += slip as i64;
-                skipped = slip;
-            }
+            return (q, 0, 0);
         }
-        let correcting = ahead.abs() > SLIP;
-        let mut late = 0;
-        let mut played = false;
+        self.off = 0;
+        let slip = count(ahead.abs()).min((out.len() / SLIP_RATE).max(1));
+        if ahead > SLIP {
+            out[..slip].fill(self.last.to_le_bytes());
+            (q, slip, 0)
+        } else if ahead < -SLIP {
+            q += signed(slip);
+            (q, 0, slip)
+        } else {
+            (q, 0, 0)
+        }
+    }
+
+    /// Fills `out[i..]` with input index `q` onward. Returns the next index, the
+    /// samples skipped as late and those missing, and whether any audio played.
+    fn copy(&mut self, out: &mut [[u8; 4]], mut i: usize, mut q: i64) -> (i64, usize, usize, bool) {
+        let n = out.len();
+        let (mut late, mut missing, mut played) = (0, 0, false);
+        let Some(ring) = self.ring.as_mut() else {
+            return (q, late, missing, played);
+        };
         while i < n {
             let Some(frame) = ring.first() else {
                 break;
             };
             let len = frame.len;
-            let head = frame.index as i64 + self.used as i64;
+            let head = index(frame.index) + signed(self.used);
             let left = len - self.used;
-            if head + left as i64 <= q {
+            if head + signed(left) <= q {
                 late += left;
                 self.used = len;
             } else if head < q {
-                let k = (q - head) as usize;
+                let k = count(q - head);
                 late += k;
                 self.used += k;
                 continue;
             } else if head > q {
-                let k = ((head - q) as usize).min(n - i);
+                let k = count(head - q).min(n - i);
                 out[i..i + k].fill([0; 4]);
-                if counting {
-                    rt.stats
-                        .underrun_samples
-                        .fetch_add(k as u64, Ordering::Relaxed);
-                }
+                missing += k;
                 i += k;
-                q += k as i64;
+                q += signed(k);
                 continue;
             } else {
                 let k = left.min(n - i);
@@ -401,7 +438,7 @@ impl Playback {
                     *slot = sample.to_le_bytes();
                 }
                 i += k;
-                q += k as i64;
+                q += signed(k);
                 self.used += k;
                 played = true;
             }
@@ -410,39 +447,50 @@ impl Playback {
                 self.used = 0;
             }
         }
-        if i < n {
-            out[i..].fill([0; 4]);
-            if counting {
-                rt.stats
-                    .underrun_samples
-                    .fetch_add((n - i) as u64, Ordering::Relaxed);
-            }
-            q += (n - i) as i64;
-        }
-        let late = late.saturating_sub(skipped);
-        if counting {
-            rt.stats
-                .late_samples
-                .fetch_add(late as u64, Ordering::Relaxed);
-            if late > 0 {
-                self.clean_for = 0;
-                if !correcting && self.flowing_for >= SETTLE {
-                    self.reserve = (reserve + 1).min(MAX_RESERVE);
-                }
-            } else {
-                self.clean_for += n;
-                if self.clean_for >= RESERVE_DECAY && self.reserve > self.base_reserve {
-                    self.reserve = reserve.saturating_sub(self.period).max(self.base_reserve);
-                    self.clean_for = 0;
-                }
-            }
-            self.flowing_for += n;
-        } else if played && !flowing {
-            rt.stats.flowing.store(true, Ordering::Relaxed);
-        }
-        self.last = f32::from_le_bytes(out[n - 1]);
-        self.next = Some(q);
+        out[i..].fill([0; 4]);
+        missing += n - i;
+        q += signed(n - i);
+        (q, late, missing, played)
     }
+
+    fn adapt_reserve(&mut self, reserve: usize, late: bool, correcting: bool, n: usize) {
+        if late {
+            self.clean_for = 0;
+            if !correcting && self.flowing_for >= SETTLE {
+                self.reserve = (reserve + 1).min(MAX_RESERVE);
+            }
+        } else {
+            self.clean_for += n;
+            if self.clean_for >= RESERVE_DECAY && self.reserve > self.base_reserve {
+                self.reserve = reserve.saturating_sub(self.period).max(self.base_reserve);
+                self.clean_for = 0;
+            }
+        }
+        self.flowing_for += n;
+    }
+}
+
+// Sample counts and indices stay far inside these ranges. The conversions saturate
+// rather than panic, since they run in the realtime callbacks.
+fn signed(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+fn index(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+fn count(n: i64) -> usize {
+    usize::try_from(n).unwrap_or(0)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "graph time differences are far below 2^52 ns"
+)]
+fn ns_to_samples(ns: i64) -> i64 {
+    (ns as f64 * f64::from(RATE) / 1e9).round() as i64
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1102,11 +1150,11 @@ fn watch_stderr(
             .and_then(|n| n.parse::<usize>().ok())
         {
             // The feeder then closes the worker's input, failing the start with this.
-            if n != FRAME {
+            if n == FRAME {
+                let _ = events.send(Event::WorkerReady(kind, session));
+            } else {
                 failed = true;
                 *shared.last_line.lock().unwrap() = format!("frame size {n}, expected {FRAME}");
-            } else {
-                let _ = events.send(Event::WorkerReady(kind, session));
             }
             let _ = frame.send(n);
         }
@@ -1139,11 +1187,10 @@ fn feed_worker(
         }
         match frame.recv_timeout(Duration::from_millis(20)) {
             Ok(n) if n == FRAME => break,
-            Ok(_) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 ring.clear();
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
     ring.clear();
