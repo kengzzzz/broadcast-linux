@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Setup: removes the previous NVIDIA Broadcast build's files after installing a newer one.
+- Mic and speaker: a reworked audio pipeline lowers delay.
+- Mic and speaker: a slow model frame now causes a short gap instead of extra delay for the rest of the call.
 
 ## 0.4.1 - 2026-10-08
 
