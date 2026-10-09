@@ -102,6 +102,7 @@ The **Setup** page includes diagnostics and service logs.
 - [Configuration](docs/configuration.md): manual settings, device routing and applying changes
 - [CLI usage](docs/cli.md): setup and service management from the terminal
 - [Building](docs/building.md): source builds, release tarballs and maintainer steps
+- [Architecture](docs/architecture.md): how the service, Wine workers and pipelines fit together, with measured latency
 
 ## Licence
 
