@@ -1,7 +1,7 @@
 # Maintainer: kengzzzz
 
 pkgname=broadcast-linux-bin
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc="NVIDIA Broadcast effects as a virtual mic and camera under Wine"
 arch=(x86_64)

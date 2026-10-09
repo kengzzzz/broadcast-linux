@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 - 2026-10-09
+
+Lower mic and speaker delay.
 
 - Setup: removes the previous NVIDIA Broadcast build's files after installing a newer one.
 - Mic and speaker: a reworked audio pipeline lowers delay.
