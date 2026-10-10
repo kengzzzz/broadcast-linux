@@ -14,13 +14,13 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use sha2::{Digest, Sha256};
 
-use crate::config::CameraConfig;
-use crate::frames::{Decoder, Layout, SharedFrames};
+use crate::config::{CameraConfig, InputColor};
+use crate::frames::{Decoder, SharedFrames};
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
 use crate::status::{self, State};
 use crate::v4l2::Loopback;
-use crate::webcam::{self, Capture};
+use crate::webcam::{self, Capture, Color, Format};
 use crate::worker::{Launch, Worker};
 
 /// Placeholder rate while no effect is running; enough to keep the device listed.
@@ -425,14 +425,19 @@ impl CameraLoop {
     fn start_session(&self) -> Result<Session> {
         let input = &self.config.input;
         let format = webcam::choose(input, self.config.input_format, self.width, self.height)?;
-        eprintln!("camera: capturing {input} as {}", format.label());
         let mut capture = Capture::open(input, format, self.width, self.height, self.config.fps)?;
+        let color = Color::resolve(format, self.config.input_color, capture.reported_color());
+        eprintln!("camera: capturing {input} as {}, {color}", format.label());
+        if format == Format::Mjpeg && self.config.input_color != InputColor::Auto {
+            eprintln!("camera: input_color only applies to YUYV and NV12, so MJPEG ignores it");
+        }
         // MJPEG chroma subsampling is only known from a frame.
         let deadline = Instant::now() + Duration::from_secs(5);
         let decoder = loop {
             if let Some(decoder) = capture.newest(Duration::from_millis(200), |frame| {
                 Decoder::new(
                     format,
+                    color,
                     frame,
                     self.width,
                     self.height,
@@ -455,8 +460,7 @@ impl CameraLoop {
         )?);
         let (tokens_in, tokens_out) = io::pipe()?;
         let (worker, tokens) = if effects {
-            let (worker, stdout) =
-                self.spawn_worker(Stdio::from(tokens_in), decoder.layout(), &frames)?;
+            let (worker, stdout) = self.spawn_worker(Stdio::from(tokens_in), &decoder, &frames)?;
             (Some(worker), File::from(OwnedFd::from(stdout)))
         } else {
             (None, File::from(OwnedFd::from(tokens_in)))
@@ -489,7 +493,7 @@ impl CameraLoop {
     fn spawn_worker(
         &self,
         tokens: Stdio,
-        layout: Layout,
+        decoder: &Decoder,
         frames: &SharedFrames,
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
@@ -499,7 +503,9 @@ impl CameraLoop {
             "--size".into(),
             self.size(),
             "--input".into(),
-            layout.worker_name().into(),
+            decoder.layout().worker_name().into(),
+            "--color".into(),
+            decoder.color().worker_name().into(),
             "--shm".into(),
             frames.path().context("no shared frames for the worker")?,
         ];

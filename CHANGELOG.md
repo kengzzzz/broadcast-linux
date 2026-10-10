@@ -6,6 +6,10 @@ Lower and steady mic and speaker delay.
 
 - Mic and speaker: about 5 ms less delay with noise or echo removal, and with no effects.
 - Mic and speaker: the delay stays the same for the whole call, also with the camera off. It used to creep up, with short gaps. The GPU now stays at a middle power state while an app has the mic or speaker open, which uses a little more power.
+- Camera: YUYV and NV12 webcams use the colors their driver reports, instead of always BT.601 limited range.
+- Camera: new `input_color` setting (Camera > Advanced) for YUYV and NV12 webcams with wrong colors.
+- Camera: the log warns when the webcam gives a lower frame rate than asked, as many do with YUYV at 1080p.
+- Settings window: Webcam format only lists the formats your webcam offers at the chosen size.
 
 ## 0.4.2 - 2026-10-09
 

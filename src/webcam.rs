@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::config::InputFormat;
+use crate::config::{InputColor, InputFormat};
 use crate::v4l2::{self, PixFormat};
 
 const VIDIOC_QUERYCAP: libc::c_ulong = 0x8068_5600;
@@ -30,6 +30,7 @@ const CAP_STREAMING: u32 = 0x0400_0000;
 const CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 const BUF_FLAG_ERROR: u32 = 0x0000_0040;
 const FRMSIZE_TYPE_DISCRETE: u32 = 1;
+const CAP_TIMEPERFRAME: u32 = 0x1000;
 const BUFFERS: u32 = 4;
 
 #[repr(C)]
@@ -171,6 +172,99 @@ impl Format {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Color {
+    pub matrix: Matrix,
+    pub full_range: bool,
+}
+
+impl Color {
+    pub const LIMITED_601: Self = Self {
+        matrix: Matrix::Bt601,
+        full_range: false,
+    };
+    /// JFIF: always BT.601 full range, whatever the driver reports.
+    pub const JPEG: Self = Self {
+        matrix: Matrix::Bt601,
+        full_range: true,
+    };
+
+    /// Resolves defaults like the kernel's `V4L2_MAP_*_DEFAULT` macros.
+    fn reported(pix: &PixFormat) -> Self {
+        const COLORSPACE_SMPTE240M: u32 = 2;
+        const COLORSPACE_REC709: u32 = 3;
+        const COLORSPACE_JPEG: u32 = 7;
+        const COLORSPACE_BT2020: u32 = 10;
+        const COLORSPACE_DCI_P3: u32 = 12;
+        const YCBCR_ENC_DEFAULT: u32 = 0;
+        const YCBCR_ENC_709: u32 = 2;
+        const YCBCR_ENC_XV709: u32 = 4;
+        const YCBCR_ENC_BT2020: u32 = 6;
+        const YCBCR_ENC_BT2020_CONST_LUM: u32 = 7;
+        const YCBCR_ENC_SMPTE240M: u32 = 8;
+        const QUANTIZATION_FULL_RANGE: u32 = 1;
+        const QUANTIZATION_LIM_RANGE: u32 = 2;
+        // NvCV lacks SMPTE 240M, which is close to BT.709.
+        let matrix = match (pix.ycbcr_enc, pix.colorspace) {
+            (YCBCR_ENC_709 | YCBCR_ENC_XV709 | YCBCR_ENC_SMPTE240M, _)
+            | (YCBCR_ENC_DEFAULT, COLORSPACE_REC709 | COLORSPACE_DCI_P3 | COLORSPACE_SMPTE240M) => {
+                Matrix::Bt709
+            }
+            (YCBCR_ENC_BT2020 | YCBCR_ENC_BT2020_CONST_LUM, _)
+            | (YCBCR_ENC_DEFAULT, COLORSPACE_BT2020) => Matrix::Bt2020,
+            _ => Matrix::Bt601,
+        };
+        let full_range = match pix.quantization {
+            QUANTIZATION_FULL_RANGE => true,
+            QUANTIZATION_LIM_RANGE => false,
+            _ => pix.colorspace == COLORSPACE_JPEG,
+        };
+        Self { matrix, full_range }
+    }
+
+    pub fn resolve(format: Format, setting: InputColor, reported: Self) -> Self {
+        let (matrix, full_range) = match (format, setting) {
+            (Format::Mjpeg, _) => return Self::JPEG,
+            (_, InputColor::Auto) => return reported,
+            (_, InputColor::Bt601) => (Matrix::Bt601, false),
+            (_, InputColor::Bt601Full) => (Matrix::Bt601, true),
+            (_, InputColor::Bt709) => (Matrix::Bt709, false),
+            (_, InputColor::Bt709Full) => (Matrix::Bt709, true),
+        };
+        Self { matrix, full_range }
+    }
+
+    pub fn worker_name(self) -> &'static str {
+        match (self.matrix, self.full_range) {
+            (Matrix::Bt601, false) => "601",
+            (Matrix::Bt601, true) => "601-full",
+            (Matrix::Bt709, false) => "709",
+            (Matrix::Bt709, true) => "709-full",
+            (Matrix::Bt2020, false) => "2020",
+            (Matrix::Bt2020, true) => "2020-full",
+        }
+    }
+}
+
+impl std::fmt::Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let matrix = match self.matrix {
+            Matrix::Bt601 => "BT.601",
+            Matrix::Bt709 => "BT.709",
+            Matrix::Bt2020 => "BT.2020",
+        };
+        let range = if self.full_range { "full" } else { "limited" };
+        write!(f, "{matrix} {range} range")
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Sizes {
     Discrete(Vec<(u32, u32)>),
@@ -278,6 +372,14 @@ pub struct Webcam {
     pub name: String,
     /// In any supported format, largest first.
     pub sizes: Vec<(u32, u32)>,
+    formats: Vec<(Format, Sizes)>,
+}
+
+impl Webcam {
+    /// The format the service would capture in, if any.
+    pub fn format_for(&self, wanted: InputFormat, width: u32, height: u32) -> Option<Format> {
+        find(&self.formats, wanted, width, height)
+    }
 }
 
 /// Sizes offered when a webcam reports a range instead of a list.
@@ -327,6 +429,7 @@ pub fn list() -> Vec<Webcam> {
                 path,
                 name: name.trim().to_owned(),
                 sizes,
+                formats,
             })
         })
         .collect()
@@ -357,11 +460,7 @@ fn pick(
     width: u32,
     height: u32,
 ) -> Result<Format> {
-    if let Some(format) = Format::candidates(wanted).iter().copied().find(|c| {
-        formats
-            .iter()
-            .any(|(f, sizes)| f == c && sizes.fits(width, height))
-    }) {
+    if let Some(format) = find(formats, wanted, width, height) {
         return Ok(format);
     }
     let listed: Vec<String> = formats
@@ -375,6 +474,64 @@ fn pick(
     )
 }
 
+fn find(
+    formats: &[(Format, Sizes)],
+    wanted: InputFormat,
+    width: u32,
+    height: u32,
+) -> Option<Format> {
+    Format::candidates(wanted).iter().copied().find(|c| {
+        formats
+            .iter()
+            .any(|(f, sizes)| f == c && sizes.fits(width, height))
+    })
+}
+
+fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32), fps: u32) {
+    let mut parm = StreamParm {
+        type_: BUF_TYPE_VIDEO_CAPTURE,
+        parm: [0; 50],
+    };
+    parm.parm[2] = 1;
+    parm.parm[3] = fps;
+    if let Err(e) = ioctl(file, VIDIOC_S_PARM, &mut parm) {
+        eprintln!("camera: {input} did not accept {fps} fps: {e}");
+        return;
+    }
+    if parm.parm[0] & CAP_TIMEPERFRAME == 0 {
+        return;
+    }
+    if let Some(actual) = slower_fps(parm.parm[2], parm.parm[3], fps) {
+        let mjpeg = format != Format::Mjpeg
+            && find(&list_formats(file), InputFormat::Mjpeg, width, height).is_some();
+        let hint = if mjpeg {
+            "MJPEG or a smaller size may be faster"
+        } else {
+            "a smaller size may be faster"
+        };
+        eprintln!(
+            "camera: {input} gives only {actual} fps as {} at {width}x{height}, not {fps}; {hint}",
+            format.label()
+        );
+    }
+}
+
+/// The frame rate the driver set, as text, when it is under 90% of `wanted`.
+fn slower_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<String> {
+    if numerator == 0
+        || denominator == 0
+        || u64::from(denominator) * 10 >= u64::from(wanted) * u64::from(numerator) * 9
+    {
+        return None;
+    }
+    let tenths = (u64::from(denominator) * 10 + u64::from(numerator) / 2) / u64::from(numerator);
+    Some(if tenths % 10 == 0 {
+        format!("{}", tenths / 10)
+    } else {
+        format!("{}.{}", tenths / 10, tenths % 10)
+    })
+}
+
 struct Mapping {
     ptr: NonNull<libc::c_void>,
     len: usize,
@@ -383,6 +540,7 @@ struct Mapping {
 pub struct Capture {
     file: File,
     buffers: Vec<Mapping>,
+    color: Color,
 }
 
 // SAFETY: the mappings belong to this Capture alone and are only touched through &mut self.
@@ -441,15 +599,7 @@ impl Capture {
             );
         }
 
-        let mut parm = StreamParm {
-            type_: BUF_TYPE_VIDEO_CAPTURE,
-            parm: [0; 50],
-        };
-        parm.parm[2] = 1;
-        parm.parm[3] = fps;
-        if let Err(e) = ioctl(&file, VIDIOC_S_PARM, &mut parm) {
-            eprintln!("camera: {input} did not accept {fps} fps: {e}");
-        }
+        set_fps(&file, input, format, (width, height), fps);
 
         let mut request = RequestBuffers {
             count: BUFFERS,
@@ -463,6 +613,7 @@ impl Capture {
         let mut capture = Self {
             file,
             buffers: Vec::new(),
+            color: Color::reported(&pix),
         };
         for index in 0..request.count {
             let mut buf = Buffer::mmap(index);
@@ -491,6 +642,10 @@ impl Capture {
         let mut kind = BUF_TYPE_VIDEO_CAPTURE;
         ioctl(&capture.file, VIDIOC_STREAMON, &mut kind).map_err(|e| busy_or(input, &e))?;
         Ok(capture)
+    }
+
+    pub fn reported_color(&self) -> Color {
+        self.color
     }
 
     /// Waits up to `timeout` for a frame and calls `f` with the newest one; frames
@@ -634,5 +789,91 @@ mod tests {
         assert_eq!(size_of::<Buffer>(), 88);
         assert_eq!(std::mem::offset_of!(Buffer, offset), 64);
         assert_eq!(std::mem::offset_of!(Buffer, length), 72);
+    }
+
+    fn pix(colorspace: u32, ycbcr_enc: u32, quantization: u32) -> PixFormat {
+        PixFormat {
+            width: 0,
+            height: 0,
+            pixelformat: 0,
+            field: 0,
+            bytesperline: 0,
+            sizeimage: 0,
+            colorspace,
+            priv_: 0,
+            flags: 0,
+            ycbcr_enc,
+            quantization,
+            xfer_func: 0,
+        }
+    }
+
+    #[test]
+    fn resolves_reported_colors() {
+        let color = |matrix, full_range| Color { matrix, full_range };
+        assert_eq!(Color::reported(&pix(8, 1, 0)), Color::LIMITED_601);
+        assert_eq!(Color::reported(&pix(8, 0, 0)), Color::LIMITED_601);
+        assert_eq!(Color::reported(&pix(3, 0, 0)), color(Matrix::Bt709, false));
+        assert_eq!(Color::reported(&pix(8, 2, 1)), color(Matrix::Bt709, true));
+        assert_eq!(
+            Color::reported(&pix(10, 0, 0)),
+            color(Matrix::Bt2020, false)
+        );
+        assert_eq!(Color::reported(&pix(2, 0, 0)).matrix, Matrix::Bt709);
+        assert_eq!(Color::reported(&pix(7, 0, 0)), Color::JPEG);
+        assert_eq!(Color::reported(&pix(7, 1, 2)), Color::LIMITED_601);
+    }
+
+    #[test]
+    fn setting_overrides_raw_formats_only() {
+        let bt709 = Color {
+            matrix: Matrix::Bt709,
+            full_range: false,
+        };
+        assert_eq!(Color::resolve(Format::Yuyv, InputColor::Auto, bt709), bt709);
+        assert_eq!(
+            Color::resolve(Format::Nv12, InputColor::Bt601Full, bt709),
+            Color::JPEG
+        );
+        assert_eq!(
+            Color::resolve(Format::Mjpeg, InputColor::Auto, bt709),
+            Color::JPEG
+        );
+        assert_eq!(
+            Color::resolve(Format::Mjpeg, InputColor::Bt709, Color::LIMITED_601),
+            Color::JPEG
+        );
+        assert_eq!(bt709.to_string(), "BT.709 limited range");
+        assert_eq!(Color::JPEG.worker_name(), "601-full");
+    }
+
+    #[test]
+    fn reports_slower_frame_rates() {
+        assert_eq!(slower_fps(1, 5, 30).as_deref(), Some("5"));
+        assert_eq!(slower_fps(2, 15, 30).as_deref(), Some("7.5"));
+        assert_eq!(slower_fps(1001, 30000, 30), None);
+        assert_eq!(slower_fps(1, 30, 30), None);
+        assert_eq!(slower_fps(1, 60, 30), None);
+        assert_eq!(slower_fps(0, 0, 30), None);
+        assert_eq!(slower_fps(1, 0, 30), None);
+    }
+
+    #[test]
+    fn finds_formats_at_a_size() {
+        let webcam = Webcam {
+            path: "/dev/video0".into(),
+            name: "BRIO".into(),
+            sizes: vec![(1920, 1080)],
+            formats: brio(),
+        };
+        let at_1080p = |wanted| webcam.format_for(wanted, 1920, 1080);
+        assert_eq!(at_1080p(InputFormat::Auto), Some(Format::Mjpeg));
+        assert_eq!(at_1080p(InputFormat::Yuyv), Some(Format::Yuyv));
+        assert_eq!(at_1080p(InputFormat::Nv12), None);
+        assert_eq!(
+            webcam.format_for(InputFormat::Auto, 340, 340),
+            Some(Format::Yuyv)
+        );
+        assert_eq!(webcam.format_for(InputFormat::Mjpeg, 340, 340), None);
     }
 }

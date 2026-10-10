@@ -226,7 +226,7 @@ static void update_framing(struct framing *f, const NvAR_BBoxes *faces, unsigned
     f->cy = fminf(fmaxf(f->cy, half_h), height - half_h);
 }
 
-/* Input frame formats: webcam YUV is limited range, decoded MJPEG (jNNN) is full range. */
+/* Input frame formats with their default colors. */
 static const struct input_format {
     const char *name;
     NvCVImage_PixelFormat format;
@@ -240,9 +240,20 @@ static const struct input_format {
     {"j444", NVCV_YUV444, NVCV_YUV, NVCV_601 | NVCV_FULL_RANGE | NVCV_CHROMA_JPEG, 24, 1},
 };
 
+/* --color replaces these bits and keeps the chroma siting. */
+#define COLOR_BITS (NVCV_709 | NVCV_2020 | NVCV_FULL_RANGE)
+static const struct input_color {
+    const char *name;
+    unsigned colorspace;
+} input_colors[] = {
+    {"601", NVCV_601 | NVCV_VIDEO_RANGE},   {"601-full", NVCV_601 | NVCV_FULL_RANGE},
+    {"709", NVCV_709 | NVCV_VIDEO_RANGE},   {"709-full", NVCV_709 | NVCV_FULL_RANGE},
+    {"2020", NVCV_2020 | NVCV_VIDEO_RANGE}, {"2020-full", NVCV_2020 | NVCV_FULL_RANGE},
+};
+
 static void usage(void) {
     fprintf(stderr,
-            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT]\n"
+            "Usage: camera_stream.exe GREENSCREEN_MODEL_DIR --size WxH [--input FORMAT [--color COLOR]]\n"
             "           [--shm FILE [--out-device DEVICE --out-offsets OFFSET,...]]\n"
             "           [--denoise MODEL_DIR [--denoise-strength 0|1]]\n"
             "           [--eye-contact GAZE_MODEL_DIR] [--auto-frame FACE_MODEL_DIR]\n"
@@ -250,6 +261,8 @@ static void usage(void) {
             "           [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
             "           < input > output.yuyv\n"
             "FORMAT is bgr24 (default), yuyv, nv12, or planar full-range j420, j422 or j444.\n"
+            "COLOR is 601, 709 or 2020, with -full for full range. The default is 601, limited\n"
+            "range for yuyv and nv12 and full range for jNNN.\n"
             "With --shm, FILE holds 2 input frames then 2 output frames, and stdin and stdout carry\n"
             "one byte per frame: the slot to process, then the slot that is done.\n"
             "With --out-device, output frames are the v4l2loopback buffers mapped from DEVICE at\n"
@@ -269,6 +282,7 @@ int main(int argc, char **argv) {
     int blur_enabled = 0, remove_background = 0;
     unsigned width = 0, height = 0;
     const struct input_format *input = &input_formats[0];
+    const struct input_color *color = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *next = i + 1 < argc ? argv[i + 1] : NULL;
@@ -309,6 +323,16 @@ int main(int argc, char **argv) {
             for (size_t f = 0; f < sizeof input_formats / sizeof *input_formats; f++)
                 if (!strcmp(name, input_formats[f].name)) input = &input_formats[f];
             if (!input) {
+                usage();
+                return 2;
+            }
+        }
+        else if (!strcmp(a, "--color") && next) {
+            const char *name = argv[++i];
+            color = NULL;
+            for (size_t c = 0; c < sizeof input_colors / sizeof *input_colors; c++)
+                if (!strcmp(name, input_colors[c].name)) color = &input_colors[c];
+            if (!color) {
                 usage();
                 return 2;
             }
@@ -486,8 +510,9 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
     }
+    unsigned src_colorspace = color ? (input->colorspace & ~COLOR_BITS) | color->colorspace : input->colorspace;
     for (int k = 0; k < slots; k++) {
-        src_slots[k].colorspace = (unsigned char)input->colorspace;
+        src_slots[k].colorspace = (unsigned char)src_colorspace;
         out_slots[k].colorspace = NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL;
     }
     CHECK("Alloc src GPU", image_alloc(&src_gpu, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));

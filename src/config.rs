@@ -257,6 +257,17 @@ impl InputFormat {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum InputColor {
+    #[default]
+    Auto,
+    Bt601,
+    Bt601Full,
+    Bt709,
+    Bt709Full,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ParallelDecode {
     #[default]
     Auto,
@@ -271,6 +282,7 @@ pub struct CameraConfig {
     pub device: String,
     pub input: String,
     pub input_format: InputFormat,
+    pub input_color: InputColor,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -319,6 +331,7 @@ impl Default for CameraConfig {
             device: "/dev/video10".into(),
             input: "/dev/video0".into(),
             input_format: InputFormat::Auto,
+            input_color: InputColor::Auto,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -531,6 +544,13 @@ mod tests {
         let config: Config = toml::from_str("[camera]\nparallel_decode = \"on\"\n").unwrap();
         assert_eq!(config.camera.parallel_decode, ParallelDecode::On);
         assert!(toml::from_str::<Config>("[camera]\nparallel_decode = true\n").is_err());
+    }
+
+    #[test]
+    fn parses_input_color() {
+        let config: Config = toml::from_str("[camera]\ninput_color = \"bt709_full\"\n").unwrap();
+        assert_eq!(config.camera.input_color, InputColor::Bt709Full);
+        assert!(toml::from_str::<Config>("[camera]\ninput_color = \"709\"\n").is_err());
     }
 
     #[test]

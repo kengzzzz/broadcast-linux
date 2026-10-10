@@ -203,7 +203,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use broadcast_linux::config::{InputFormat, LightPreset, ParallelDecode};
+    use broadcast_linux::config::{InputColor, InputFormat, LightPreset, ParallelDecode};
 
     fn temp_dir(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -236,6 +236,9 @@ mod tests {
             ("camera.input", |c| c.camera.input = "/dev/video2".into()),
             ("camera.format", |c| {
                 c.camera.input_format = InputFormat::Yuyv;
+            }),
+            ("camera.color", |c| {
+                c.camera.input_color = InputColor::Bt709Full;
             }),
             ("camera.size", |c| {
                 c.camera.width = 1280;

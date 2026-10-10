@@ -10,7 +10,7 @@ use turbojpeg::{Decompressor, Subsamp, YuvImage};
 use crate::config::ParallelDecode;
 use crate::mjpeg;
 use crate::v4l2::Buffers;
-use crate::webcam::Format;
+use crate::webcam::{Color, Format};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -194,6 +194,7 @@ pub struct Decoder {
     width: usize,
     height: usize,
     layout: Layout,
+    color: Color,
     planes: Vec<u8>,
     luma: [u8; 256],
     chroma: [u8; 256],
@@ -204,6 +205,7 @@ pub struct Decoder {
 impl Decoder {
     pub fn new(
         format: Format,
+        color: Color,
         first: &[u8],
         width: u32,
         height: u32,
@@ -246,6 +248,7 @@ impl Decoder {
             width,
             height,
             layout,
+            color,
             planes: Vec::new(),
             luma,
             chroma,
@@ -256,6 +259,10 @@ impl Decoder {
 
     pub fn layout(&self) -> Layout {
         self.layout
+    }
+
+    pub fn color(&self) -> Color {
+        self.color
     }
 
     pub fn worker_bytes(&self) -> usize {
@@ -277,12 +284,34 @@ impl Decoder {
     /// Writes the frame as limited-range YUYV to `out`; false for a frame to skip.
     pub fn fill_for_loopback(&mut self, frame: &[u8], out: &mut [u8]) -> Result<bool> {
         let (width, height) = (self.width, self.height);
+        // Range only: BT.709 input keeps a slight hue shift here.
+        let full = self.color.full_range;
+        let (ly, lc) = (&self.luma, &self.chroma);
+        let limit = |px: [u8; 4]| {
+            [
+                ly[usize::from(px[0])],
+                lc[usize::from(px[1])],
+                ly[usize::from(px[2])],
+                lc[usize::from(px[3])],
+            ]
+        };
         match self.layout {
             Layout::Yuyv => {
                 let Some(frame) = frame.get(..out.len()) else {
                     return Ok(false);
                 };
-                out.copy_from_slice(frame);
+                if full {
+                    for (out, px) in out
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(frame.as_chunks::<4>().0)
+                    {
+                        *out = limit(*px);
+                    }
+                } else {
+                    out.copy_from_slice(frame);
+                }
             }
             Layout::Nv12 => {
                 let Some(frame) = frame.get(..width * height * 3 / 2) else {
@@ -299,7 +328,8 @@ impl Decoder {
                         .zip(y.as_chunks::<2>().0)
                         .zip(uv.as_chunks::<2>().0)
                     {
-                        *out = [y[0], uv[0], y[1], uv[1]];
+                        let px = [y[0], uv[0], y[1], uv[1]];
+                        *out = if full { limit(px) } else { px };
                     }
                 }
             }
@@ -460,6 +490,7 @@ mod tests {
             width,
             height,
             layout,
+            color: Color::LIMITED_601,
             planes: Vec::new(),
             luma,
             chroma,
@@ -503,5 +534,26 @@ mod tests {
         assert!(d.fill_for_loopback(&frame, &mut out).unwrap());
         assert_eq!(out, [1, 50, 2, 60, 3, 50, 4, 60]);
         assert!(!d.fill_for_loopback(&frame[..5], &mut out).unwrap());
+    }
+
+    #[test]
+    fn limits_full_range_raw_frames() {
+        let mut d = decoder(Layout::Yuyv, 2, 1);
+        let frame = [0, 128, 255, 255];
+        let mut out = [0; 4];
+        assert!(d.fill_for_loopback(&frame, &mut out).unwrap());
+        assert_eq!(out, frame);
+        d.color = Color::JPEG;
+        assert!(d.fill_for_loopback(&frame, &mut out).unwrap());
+        assert_eq!(out, [16, 128, 235, 240]);
+
+        let mut d = decoder(Layout::Nv12, 2, 2);
+        d.color = Color::JPEG;
+        let mut out = [0; 8];
+        assert!(
+            d.fill_for_loopback(&[0, 255, 0, 255, 0, 255], &mut out)
+                .unwrap()
+        );
+        assert_eq!(out, [16, 16, 235, 240, 16, 16, 235, 240]);
     }
 }

@@ -1,10 +1,13 @@
 use broadcast_linux::VERSION;
 use broadcast_linux::audio::Kind;
 use broadcast_linux::camera::expand_home;
-use broadcast_linux::config::{Adjustable, CameraConfig, InputFormat, LightPreset, ParallelDecode};
+use broadcast_linux::config::{
+    Adjustable, CameraConfig, InputColor, InputFormat, LightPreset, ParallelDecode,
+};
 use broadcast_linux::doctor::Status as Check;
 use broadcast_linux::graph::AudioNode;
 use broadcast_linux::status::State;
+use broadcast_linux::webcam::{Format, Webcam};
 use eframe::egui::{self, RichText};
 
 use crate::app::{App, Page, device_summary};
@@ -559,7 +562,11 @@ fn camera(app: &mut App, ui: &mut egui::Ui) {
         app.pick_background(&ctx);
     }
     camera_preview(app, ui);
-    camera_advanced(ui, &mut app.draft.camera);
+    let webcam = app
+        .webcams
+        .iter()
+        .find(|w| w.path == app.draft.camera.input);
+    camera_advanced(ui, &mut app.draft.camera, webcam);
 }
 
 fn camera_setup(app: &mut App, ui: &mut egui::Ui) {
@@ -824,7 +831,7 @@ fn camera_preview(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig) {
+fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig, webcam: Option<&Webcam>) {
     egui::CollapsingHeader::new("Advanced")
         .id_salt("camera-advanced")
         .show(ui, |ui| {
@@ -834,22 +841,70 @@ fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig) {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Webcam format");
+                        let current = draft.input_format;
+                        let (width, height) = (draft.width, draft.height);
+                        let offered = |format| {
+                            webcam.is_none_or(|w| w.format_for(format, width, height).is_some())
+                        };
+                        let label = |format| {
+                            if format == InputFormat::Auto || offered(format) {
+                                format_name(format).to_owned()
+                            } else {
+                                format!("{} (not offered)", format_name(format))
+                            }
+                        };
                         egui::ComboBox::from_id_salt("input-format")
-                            .selected_text(format_name(draft.input_format))
+                            .selected_text(label(current))
                             .show_ui(ui, |ui| {
                                 for format in [
                                     InputFormat::Auto,
                                     InputFormat::Mjpeg,
                                     InputFormat::Yuyv,
                                     InputFormat::Nv12,
-                                ] {
+                                ]
+                                .into_iter()
+                                .filter(|&format| format == current || offered(format))
+                                {
                                     ui.selectable_value(
                                         &mut draft.input_format,
                                         format,
-                                        format_name(format),
+                                        label(format),
                                     );
                                 }
                             });
+                        ui.end_row();
+                        ui.label("Webcam colors");
+                        let raw = webcam
+                            .and_then(|w| w.format_for(draft.input_format, width, height))
+                            .map_or(draft.input_format != InputFormat::Mjpeg, |format| {
+                                format != Format::Mjpeg
+                            });
+                        ui.add_enabled_ui(raw, |ui| {
+                            egui::ComboBox::from_id_salt("input-color")
+                                .selected_text(color_name(draft.input_color))
+                                .show_ui(ui, |ui| {
+                                    for color in [
+                                        InputColor::Auto,
+                                        InputColor::Bt601,
+                                        InputColor::Bt601Full,
+                                        InputColor::Bt709,
+                                        InputColor::Bt709Full,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut draft.input_color,
+                                            color,
+                                            color_name(color),
+                                        );
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Try full range if dark and bright areas lose detail.",
+                                )
+                                .on_disabled_hover_text(
+                                    "Ignored for MJPEG, which is always BT.601 full range.",
+                                );
+                        });
                         ui.end_row();
                         ui.label("Parallel decoding");
                         egui::ComboBox::from_id_salt("parallel-decode")
@@ -892,6 +947,16 @@ fn format_name(format: InputFormat) -> &'static str {
         InputFormat::Mjpeg => "MJPEG",
         InputFormat::Yuyv => "YUYV",
         InputFormat::Nv12 => "NV12",
+    }
+}
+
+fn color_name(color: InputColor) -> &'static str {
+    match color {
+        InputColor::Auto => "Automatic (from the driver)",
+        InputColor::Bt601 => "BT.601, limited range",
+        InputColor::Bt601Full => "BT.601, full range",
+        InputColor::Bt709 => "BT.709, limited range",
+        InputColor::Bt709Full => "BT.709, full range",
     }
 }
 
