@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 - 2026-10-10
 
-Lower and steady mic and speaker delay.
+Lower and steady mic and speaker delay, and correct webcam colors.
 
 - Mic and speaker: about 5 ms less delay with noise or echo removal, and with no effects.
 - Mic and speaker: the delay stays the same for the whole call, also with the camera off. It used to creep up, with short gaps. The GPU now stays at a middle power state while an app has the mic or speaker open, which uses a little more power.

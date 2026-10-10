@@ -17,7 +17,7 @@ updpkgsums
 makepkg --printsrcinfo > .SRCINFO
 makepkg --verifysource --force
 git add PKGBUILD .SRCINFO broadcast-linux.install LICENSE
-git commit -m "Release 0.4.2"
+git commit -m "Release 0.4.3"
 git push origin master
 ```
 
