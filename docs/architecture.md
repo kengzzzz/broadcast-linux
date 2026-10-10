@@ -40,7 +40,8 @@ flowchart LR
 
 - **One clock:** the capture stream and the virtual node share a PipeWire node group, so they never drift.
 - **Fixed delay:** each sample plays one frame plus a reserve after capture. A late frame becomes a short gap, not extra delay.
-- **Reserve:** covers the worker's round trip, about 10 ms rounded up to whole PipeWire periods.
+- **Reserve:** covers the worker's round trip, about 5 ms rounded up to whole PipeWire periods. The nodes ask for 256-sample periods, so that is one 5.3 ms period. Studio Voice does its work on every other frame, so it gets two.
+- **GPU kept awake:** with only an audio model running, the GPU may keep switching power states, and a run near a switch can take 25 ms. The worker clears 128 MB of GPU memory after each frame, which holds a middle power state. Runs then stay well inside the reserve, for a little more power. This lasts while any app has the mic or speaker open, even a silent one. A few seconds after the last app closes it, the GPU idles again.
 - **Speaker:** the same pipeline the other way round, from apps to the real output.
 
 ## Camera
@@ -60,33 +61,5 @@ flowchart LR
 
 ## Latency
 
-Measured on an RTX 50 series GPU.
-
-### Audio
-
-Mic or speaker with noise and echo removal, PipeWire 1.6 at its usual 512-sample period.
-
-| Stage | Delay |
-|---|---|
-| NVIDIA model look-ahead | 70 ms |
-| NVIDIA model frame | 40 ms |
-| Reserve for the worker (one period) | 10.7 ms |
-| **Total** | **121 ms** |
-
-With every effect off, the delay is one period: 11 ms. Larger periods raise the reserve,
-to 20 ms (130 ms total) at 960 samples. Measure with `tools/measure/mic-latency.sh` and
-`speaker-latency.sh`.
-
-### Camera
-
-Logitech BRIO, MJPEG at 1080p30, with video noise removal and Studio Light.
-
-| Stage | Delay |
-|---|---|
-| Webcam capture and delivery | ~33 ms |
-| MJPEG decode | ~2.4 ms |
-| GPU effects and transfers | ~10 ms |
-| **Total** | **~46 ms** |
-
-`parallel_decode = "on"` cuts decode to ~0.7 ms, for about 30% more decode CPU. Eye
-Contact adds ~2.3 ms.
+Measured delay, CPU and GPU power, on Linux and on Windows with NVIDIA Broadcast:
+see [Benchmark](benchmark.md).

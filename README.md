@@ -22,6 +22,11 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 - Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
   or higher
 
+Only tested on an RTX 50 card. NVIDIA ships a separate installer for each GPU generation,
+RTX 20 to RTX 50. Their 43 program DLLs are byte-identical apart from the signature, and
+only the AI model files are built per generation, so RTX 20, 30 and 40 cards should work
+too. Reports are welcome in [issue #1](https://github.com/kengzzzz/broadcast-linux/issues/1).
+
 ### Linux app
 
 - Packaged: Arch Linux, Fedora, Debian 13+, Ubuntu 26.04+, and Ubuntu 26.04-based Linux Mint
@@ -102,7 +107,8 @@ The **Setup** page includes diagnostics and service logs.
 - [Configuration](docs/configuration.md): manual settings, device routing and applying changes
 - [CLI usage](docs/cli.md): setup and service management from the terminal
 - [Building](docs/building.md): source builds, release tarballs and maintainer steps
-- [Architecture](docs/architecture.md): how the service, Wine workers and pipelines fit together, with measured latency
+- [Architecture](docs/architecture.md): how the service, Wine workers and pipelines fit together
+- [Benchmark](docs/benchmark.md): delay, CPU and GPU power, compared with NVIDIA Broadcast on Windows
 
 ## Licence
 
