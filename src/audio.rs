@@ -13,7 +13,7 @@ use pw::spa;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 
-use crate::config::{MicConfig, SpeakerConfig, Stage};
+use crate::config::{AudioEffect, MicConfig, SpeakerConfig, Stage};
 use crate::graph;
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
@@ -24,8 +24,9 @@ use crate::worker::{Launch, Worker};
 const RATE: u32 = 48_000;
 /// Broadcast's audio models all run on fixed 40 ms frames at 48 kHz.
 const FRAME: usize = 1920;
-/// Ask PipeWire for 20 ms periods; the default can be hundreds of milliseconds.
-const LATENCY: &str = "960/48000";
+/// 5.3 ms periods, so the reserve fits in one. `LATENCY` must match `PERIOD`.
+const PERIOD: usize = 256;
+const LATENCY: &str = "256/48000";
 /// Frames in the worker beyond this are dropped so latency can't build up. It also
 /// keeps the worker from dropping frames itself, which would misalign output indices.
 const MAX_IN_FLIGHT: u64 = 2;
@@ -37,9 +38,14 @@ const SLIP: i64 = 24;
 const SLIP_RATE: usize = 64;
 /// Further behind than this, or ahead by more than the reserve, jumps instead.
 const JUMP_BEHIND: i64 = RATE as i64 / 10;
-/// Covers the worker's round trip for a frame, up to about 9 ms.
-const RESERVE: usize = RATE as usize / 100;
+/// Covers the worker's round trip for a frame, up to about 4 ms. Relies on the worker's GPU
+/// keep-awake.
+const RESERVE: usize = RATE as usize / 200;
+/// Studio Voice works on every other frame, and those runs take up to 9.4 ms on an RTX 5080.
+const STUDIO_VOICE_RESERVE: usize = RATE as usize / 100;
 const MAX_RESERVE: usize = 3 * RATE as usize / 50;
+/// Late output grows the reserve by at least this, so a slow GPU costs one gap, not several.
+const RESERVE_STEP: usize = RATE as usize / 100;
 /// Late output during model warmup doesn't grow the reserve.
 const SETTLE: usize = RATE as usize;
 /// A shorter period must last this long before it is used.
@@ -457,7 +463,7 @@ impl Playback {
         if late {
             self.clean_for = 0;
             if !correcting && self.flowing_for >= SETTLE {
-                self.reserve = (reserve + 1).min(MAX_RESERVE);
+                self.reserve = (reserve + RESERVE_STEP).min(MAX_RESERVE);
             }
         } else {
             self.clean_for += n;
@@ -867,10 +873,20 @@ impl AudioDevice {
                 stage.strength.to_string(),
             ]);
         }
+        let reserve = if self
+            .settings
+            .stages
+            .iter()
+            .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency)
+        {
+            STUDIO_VOICE_RESERVE
+        } else {
+            RESERVE
+        };
         let (in_prod, in_cons) = HeapRb::<Frame>::new(QUEUE).split();
         let (out_prod, out_cons) = HeapRb::<Frame>::new(QUEUE).split();
         self.rt
-            .connect(Some(in_prod), true, Some(out_cons), FRAME, RESERVE);
+            .connect(Some(in_prod), true, Some(out_cons), FRAME, reserve);
         let stream = self.session_stream(&target)?;
 
         let (worker, pipes) = Worker::spawn(Launch {
@@ -1101,7 +1117,7 @@ fn playback_process(stream: &pw::stream::Stream, rt: &Rt) {
     let n = if let Some(bytes) = data.data() {
         let slots = bytes.as_chunks_mut::<4>().0;
         let n = if requested == 0 {
-            slots.len().min(960)
+            slots.len().min(PERIOD)
         } else {
             requested.min(slots.len())
         };

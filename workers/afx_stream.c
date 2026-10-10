@@ -58,6 +58,44 @@ struct stage {
     double max_ms;
 };
 
+/* With only an audio model on the GPU, the driver may keep switching power states, and runs
+ * near a switch take up to 25 ms. Clearing 128 MB per frame holds P3 or above while audio
+ * flows. Smaller clears made the switching worse. */
+#define KEEPAWAKE_BYTES (128u << 20)
+#define CU_STREAM_NON_BLOCKING 1
+
+typedef int (WINAPI *memset_async_fn)(unsigned long long, unsigned int, size_t, void *);
+
+struct keepawake {
+    memset_async_fn memset_async;
+    unsigned long long buf;
+    void *stream;
+};
+
+/* Runs after the effects load, so the context NVIDIA's runtime made current is reused. */
+static int keepawake_start(struct keepawake *k) {
+    typedef int (WINAPI *get_ctx_fn)(void **);
+    typedef int (WINAPI *retain_fn)(void **, int);
+    typedef int (WINAPI *set_ctx_fn)(void *);
+    typedef int (WINAPI *alloc_fn)(unsigned long long *, size_t);
+    typedef int (WINAPI *stream_fn)(void **, unsigned int);
+    HMODULE cuda = LoadLibraryA("nvcuda.dll");
+    if (!cuda)
+        return -1;
+    get_ctx_fn get_ctx = (get_ctx_fn)GetProcAddress(cuda, "cuCtxGetCurrent");
+    retain_fn retain = (retain_fn)GetProcAddress(cuda, "cuDevicePrimaryCtxRetain");
+    set_ctx_fn set_ctx = (set_ctx_fn)GetProcAddress(cuda, "cuCtxSetCurrent");
+    alloc_fn alloc = (alloc_fn)GetProcAddress(cuda, "cuMemAlloc_v2");
+    stream_fn stream_create = (stream_fn)GetProcAddress(cuda, "cuStreamCreate");
+    k->memset_async = (memset_async_fn)GetProcAddress(cuda, "cuMemsetD32Async");
+    if (!get_ctx || !retain || !set_ctx || !alloc || !stream_create || !k->memset_async)
+        return -1;
+    void *ctx = NULL;
+    if ((get_ctx(&ctx) || !ctx) && (retain(&ctx, 0) || set_ctx(ctx)))
+        return -1;
+    return alloc(&k->buf, KEEPAWAKE_BYTES) || stream_create(&k->stream, CU_STREAM_NON_BLOCKING) ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 5 || (argc - 2) % 3) {
         fprintf(stderr, "Usage: %s CUSHION_MS EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n",
@@ -135,6 +173,11 @@ int main(int argc, char **argv) {
             cur = stages[i].out;
         }
     }
+    struct keepawake keepawake = {0};
+    if (keepawake_start(&keepawake)) {
+        keepawake.memset_async = NULL;
+        fprintf(stderr, "Could not start the GPU keep-awake; runs may be slow while the GPU idles\n");
+    }
     fprintf(stderr, "%s ready; %u samples per frame at 48 kHz mono f32\n", names, frame);
 
     LARGE_INTEGER freq, t0, t1;
@@ -175,6 +218,8 @@ int main(int argc, char **argv) {
         if (fwrite(cur, sizeof(float), frame, stdout) != frame)
             break;
         fflush(stdout);
+        if (keepawake.memset_async)
+            keepawake.memset_async(keepawake.buf, 0, KEEPAWAKE_BYTES / 4, keepawake.stream);
         if (++frames % 250 == 0) {
             fprintf(stderr, "Processed %lu frames, failures %lu, dropped %lu, max run", frames,
                     failures, dropped);
