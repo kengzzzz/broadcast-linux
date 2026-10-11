@@ -31,6 +31,19 @@ reserve: 121 ms at 512 samples, 130 ms at 960.
 1080p30 with video noise removal and Studio Light. `parallel_decode = "on"` cuts decode
 to ~0.7 ms for about 30% more decode CPU. Eye Contact adds ~2.3 ms.
 
+### Camera delay on a slower GPU, ms
+
+Same effects with the GPU locked at 600 MHz. They take about 52 ms per frame instead of
+10.7 ms, so the camera runs at about 19 fps.
+
+| Decode | fps | avg | p50 | p95 |
+|---|---|---|---|---|
+| Right away (0.4.3) | 19.0 | 155.3 | 154.8 | 171.4 |
+| Just before the GPU is free | 19.3 | 107.1 | 107.1 | 122.2 |
+
+The difference is the time a frame waits for the GPU: 50.4 ms before, 3.0 ms now. At full
+clock the GPU keeps up, and both give about 46.5 ms.
+
 ### Resources
 
 | Path | CPU, % of one core | GPU power, W |
@@ -76,5 +89,7 @@ The min is the fastest Broadcast managed. Most of its noise removal runs were 11
 - Linux's mic GPU power includes the keep-awake that holds the GPU at P3 while an app
   has the mic open. Windows stays at P5 without late frames.
 - The camera ran at 29.8 fps on Linux and 29.5 fps on Windows.
+- Camera delay on a slower GPU: `tools/camera-latency`, 30 s each, from the webcam's
+  capture timestamp to the processed frame. GPU locked with `nvidia-smi -lgc 600,600`.
 - RTX 20, 30 and 40 cards aren't measured. Their audio models are separate builds of the
   same versions, so the look-ahead should match. A slower GPU may need a longer reserve.

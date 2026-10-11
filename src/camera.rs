@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -109,11 +110,78 @@ struct Session {
     _worker: Option<Worker>,
     _feed: Feed,
     frames: Arc<SharedFrames>,
-    free: Sender<usize>,
+    free: Sender<Freed>,
     /// With mapped loopback buffers, the slot on screen (`Loopback::shown`) stays out of
     /// circulation until a newer frame is queued, so the feed and worker never write it.
     hold_shown: bool,
     live: bool,
+}
+
+struct Freed {
+    slot: usize,
+    /// When the worker finished a frame; `None` for a session's first slots.
+    done: Option<Instant>,
+}
+
+/// When the worker is slower than the webcam, times each decode to end just before the
+/// worker is free, so the frame doesn't wait a whole run in line.
+#[derive(Default)]
+pub struct Pace {
+    /// Send times of frames still with the worker, oldest first.
+    sent: VecDeque<Instant>,
+    last_done: Option<Instant>,
+    runs: Recent,
+    decodes: Recent,
+}
+
+impl Pace {
+    /// For jitter in decode and run times.
+    const MARGIN: Duration = Duration::from_millis(3);
+
+    pub fn sent(&mut self, at: Instant, decode: Duration) {
+        self.sent.push_back(at);
+        self.decodes.push(decode);
+    }
+
+    pub fn done(&mut self, at: Instant) {
+        let Some(sent) = self.sent.pop_front() else {
+            return;
+        };
+        // The first run also loads the models, so it isn't counted.
+        if let Some(last) = self.last_done.replace(at) {
+            self.runs.push(at.saturating_duration_since(sent.max(last)));
+        }
+    }
+
+    /// When to start decoding the next frame; `None` for right away.
+    pub fn next_decode(&self) -> Option<Instant> {
+        let &sent = self.sent.front()?;
+        let started = self.last_done.map_or(sent, |last| sent.max(last));
+        let queued = u32::try_from(self.sent.len()).ok()?;
+        let lead = self.decodes.median()? + Self::MARGIN;
+        (started + self.runs.median()? * queued).checked_sub(lead)
+    }
+}
+
+/// Recent durations. Their median ignores a one-off stall.
+#[derive(Default)]
+struct Recent(VecDeque<Duration>);
+
+impl Recent {
+    const LEN: usize = 9;
+
+    fn push(&mut self, value: Duration) {
+        if self.0.len() == Self::LEN {
+            self.0.pop_front();
+        }
+        self.0.push_back(value);
+    }
+
+    fn median(&self) -> Option<Duration> {
+        let mut sorted: Vec<Duration> = self.0.iter().copied().collect();
+        sorted.sort_unstable();
+        sorted.get(sorted.len() / 2).copied()
+    }
 }
 
 struct Feed {
@@ -126,24 +194,38 @@ impl Feed {
         mut capture: Capture,
         mut decoder: Decoder,
         frames: Arc<SharedFrames>,
-        free: Receiver<usize>,
+        free: Receiver<Freed>,
         mut tokens: PipeWriter,
         to_worker: bool,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let thread = thread::spawn(move || {
-            let mut slot = None;
+            let mut pace = Pace::default();
+            let mut slots = VecDeque::new();
             while !flag.load(Ordering::Relaxed) {
-                let k = match slot.take() {
-                    Some(k) => k,
-                    None => match free.recv_timeout(Duration::from_millis(100)) {
-                        Ok(k) => k,
-                        Err(RecvTimeoutError::Timeout) => continue,
+                let now = Instant::now();
+                let wake = pace.next_decode().filter(|&at| at > now);
+                if slots.is_empty() || wake.is_some() {
+                    let wait = wake.map_or(Duration::from_millis(100), |at| {
+                        (at - now).min(Duration::from_millis(100))
+                    });
+                    match free.recv_timeout(wait) {
+                        Ok(freed) => {
+                            if let Some(done) = freed.done {
+                                pace.done(done);
+                            }
+                            slots.push_back(freed.slot);
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
-                    },
-                };
+                    }
+                    continue;
+                }
+                let k = slots[0];
+                let mut took = Duration::ZERO;
                 let sent = capture.newest(Duration::from_millis(100), |frame| -> Result<bool> {
+                    let start = Instant::now();
                     // SAFETY: slot k came back as free, so nothing else uses it until
                     // its number is sent on below.
                     let filled = if to_worker {
@@ -151,14 +233,18 @@ impl Feed {
                     } else {
                         decoder.fill_for_loopback(frame, unsafe { frames.output(k) })?
                     };
+                    took = start.elapsed();
                     if filled {
                         tokens.write_all(&[u8::try_from(k)?])?;
                     }
                     Ok(filled)
                 });
                 match sent {
-                    Ok(Some(Ok(true))) => {}
-                    Ok(None | Some(Ok(false))) => slot = Some(k),
+                    Ok(Some(Ok(true))) => {
+                        slots.pop_front();
+                        pace.sent(Instant::now(), took);
+                    }
+                    Ok(None | Some(Ok(false))) => {}
                     Ok(Some(Err(e))) | Err(e) => {
                         let closed = e
                             .downcast_ref::<io::Error>()
@@ -469,7 +555,10 @@ impl CameraLoop {
         let hold_shown = frames.loopback().is_some();
         let (free, free_slots) = mpsc::channel();
         for k in (0..frames.slots()).filter(|&k| !hold_shown || k != self.loopback.shown()) {
-            let _ = free.send(k);
+            let _ = free.send(Freed {
+                slot: k,
+                done: None,
+            });
         }
         let feed = Feed::start(
             capture,
@@ -615,8 +704,12 @@ impl CameraLoop {
                     // Show only the newest finished frame and hand older ones straight back.
                     let (&newest, older) = slots.split_last().unwrap_or((&0, &[]));
                     let newest = usize::from(newest);
+                    let done = Some(Instant::now());
+                    let free = |slot| {
+                        let _ = session.free.send(Freed { slot, done });
+                    };
                     for &k in older {
-                        let _ = session.free.send(usize::from(k));
+                        free(usize::from(k));
                     }
                     if !session.live {
                         session.live = true;
@@ -630,12 +723,12 @@ impl CameraLoop {
                         } else {
                             newest
                         };
-                        let _ = session.free.send(freed);
+                        free(freed);
                     } else {
                         // SAFETY: the token gives this thread slot `newest` until it is sent
                         // back, and without mapped buffers write_frame() only copies.
                         let _ = unsafe { self.loopback.write_frame(session.frames.output(newest)) };
-                        let _ = session.free.send(newest);
+                        free(newest);
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
@@ -748,6 +841,45 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
+
+    #[test]
+    fn decodes_just_before_a_slow_worker_is_free() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut pace = Pace::default();
+        assert_eq!(pace.next_decode(), None, "nothing in flight");
+        pace.sent(t0, ms(4));
+        assert_eq!(pace.next_decode(), None, "no run measured yet");
+        pace.done(t0 + ms(500));
+        pace.sent(t0 + ms(500), ms(4));
+        assert_eq!(pace.next_decode(), None, "the loading run is not counted");
+        pace.done(t0 + ms(540));
+        assert_eq!(pace.next_decode(), None, "the worker is idle");
+
+        // Sent while the worker was idle, so the run starts when it was sent.
+        pace.sent(t0 + ms(600), ms(4));
+        assert_eq!(pace.next_decode(), Some(t0 + ms(633)));
+        // A frame queued behind it pushes the decode back by a run.
+        pace.sent(t0 + ms(610), ms(4));
+        assert_eq!(pace.next_decode(), Some(t0 + ms(673)));
+        pace.done(t0 + ms(640));
+        // The queued frame started when the one before it finished.
+        assert_eq!(pace.next_decode(), Some(t0 + ms(673)));
+    }
+
+    #[test]
+    fn a_single_stall_does_not_move_the_estimate() {
+        let ms = Duration::from_millis;
+        let mut recent = Recent::default();
+        for run in [40, 41, 39, 400, 40] {
+            recent.push(ms(run));
+        }
+        assert_eq!(recent.median(), Some(ms(40)));
+        for _ in 0..Recent::LEN {
+            recent.push(ms(10));
+        }
+        assert_eq!(recent.median(), Some(ms(10)), "only recent runs count");
+    }
 
     #[test]
     fn background_cache_follows_the_chosen_image() {

@@ -56,6 +56,7 @@ flowchart LR
 ```
 
 - **Decode:** libjpeg-turbo straight to planar YUV, on several cores above 1080p30.
+- **Slow GPU:** if the effects take longer than a webcam frame, the next frame is decoded just before the GPU is free, so it doesn't wait in line.
 - **Output:** written straight into the loopback's buffers with v4l2loopback 0.14+ and `max_buffers=3`.
 - **Idle:** a placeholder frame keeps the virtual camera listed.
 

@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -541,6 +541,7 @@ pub struct Capture {
     file: File,
     buffers: Vec<Mapping>,
     color: Color,
+    captured: Option<Instant>,
 }
 
 // SAFETY: the mappings belong to this Capture alone and are only touched through &mut self.
@@ -614,6 +615,7 @@ impl Capture {
             file,
             buffers: Vec::new(),
             color: Color::reported(&pix),
+            captured: None,
         };
         for index in 0..request.count {
             let mut buf = Buffer::mmap(index);
@@ -646,6 +648,11 @@ impl Capture {
 
     pub fn reported_color(&self) -> Color {
         self.color
+    }
+
+    /// Capture time of the frame last passed by `newest`; `None` if the driver has none.
+    pub fn captured(&self) -> Option<Instant> {
+        self.captured
     }
 
     /// Waits up to `timeout` for a frame and calls `f` with the newest one; frames
@@ -682,6 +689,7 @@ impl Capture {
         let Some(buf) = newest else {
             return Ok(None);
         };
+        self.captured = capture_time(&buf);
         let mapping = &self.buffers[buf.index as usize];
         let len = (buf.bytesused as usize).min(mapping.len);
         // SAFETY: the driver filled `len` bytes of this mapping and does not touch it
@@ -706,6 +714,30 @@ impl Drop for Capture {
             unsafe { libc::munmap(mapping.ptr.as_ptr(), mapping.len) };
         }
     }
+}
+
+/// V4L2 monotonic timestamps and `Instant` share `CLOCK_MONOTONIC`.
+fn capture_time(buf: &Buffer) -> Option<Instant> {
+    const TIMESTAMP_MASK: u32 = 0x0000_e000;
+    const TIMESTAMP_MONOTONIC: u32 = 0x0000_2000;
+    if buf.flags & TIMESTAMP_MASK != TIMESTAMP_MONOTONIC {
+        return None;
+    }
+    let at = Duration::from_secs(u64::try_from(buf.timestamp[0]).ok()?)
+        + Duration::from_micros(u64::try_from(buf.timestamp[1]).ok()?);
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain syscall writing into the timespec above.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) } != 0 {
+        return None;
+    }
+    let now_mono = Duration::new(
+        u64::try_from(now.tv_sec).ok()?,
+        u32::try_from(now.tv_nsec).ok()?,
+    );
+    Instant::now().checked_sub(now_mono.checked_sub(at)?)
 }
 
 fn busy_or(input: &str, e: &io::Error) -> anyhow::Error {

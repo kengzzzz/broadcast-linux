@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Lower camera delay on slower GPUs.
+
+- Camera: less delay when the GPU can't keep up with the webcam. Each frame is now decoded just before the GPU is free, instead of waiting in line.
+
 ## 0.4.3 - 2026-10-10
 
 Lower and steady mic and speaker delay, and correct webcam colors.
