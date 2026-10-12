@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.4 - 2026-10-12
 
 Lower camera delay on slower GPUs, and lower mic and speaker delay with fewer short gaps.
 
