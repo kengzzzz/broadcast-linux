@@ -38,11 +38,18 @@ flowchart LR
     capture -.->|"no effects"| playback
 ```
 
-- **One clock:** the capture stream and the virtual node share a PipeWire node group, so they never drift.
-- **Fixed delay:** each sample plays one frame plus a reserve after capture. A late frame becomes a short gap, not extra delay.
-- **Reserve:** covers the worker's round trip, about 5 ms rounded up to whole PipeWire periods. The nodes ask for 256-sample periods, so that is one 5.3 ms period. Studio Voice does its work on every other frame, so it gets two.
-- **GPU kept awake:** with only an audio model running, the GPU may keep switching power states, and a run near a switch can take 25 ms. The worker clears 128 MB of GPU memory after each frame, which holds a middle power state. Runs then stay well inside the reserve, for a little more power. This lasts while any app has the mic or speaker open, even a silent one. A few seconds after the last app closes it, the GPU idles again.
-- **Speaker:** the same pipeline the other way round, from apps to the real output.
+- **One clock:** capture and the virtual node share a PipeWire node group, so they never drift.
+- **Fixed delay:** one 40 ms frame plus the reserve, less half a period. A late frame becomes a short gap, not extra delay.
+- **Reserve:** worker time per frame, in 5.3 ms periods (256 samples):
+  - 2 for the first 10 s, and after any round trip over 3 ms (GPU in a low power state or busy with the camera)
+  - 1 after 10 s of round trips under 2 ms
+  - 3 always for Studio Voice, which takes up to about 12 ms on every other frame
+
+  Changes are spread over about a third of a second.
+- **Half a period less:** a 1920-sample frame ends half way into a period or at its end, and reaches the worker with that period, so every frame still gets the whole reserve. [Benchmark](benchmark.md#audio-delay-ms) has other period sizes.
+- **GPU kept awake:** with only audio running, the GPU switches power states, and a frame near a switch can take 25 ms. Clearing 128 MB of GPU memory after each frame usually holds a middle power state, at a little more power.
+- **Silence until unload:** after the last app leaves, the model runs on silence until `unload_after_minutes` (default 2). An idle GPU stalls 20 to 30 ms when audio returns. `gpu_keep_awake = false` turns off this and the bullet above.
+- **Speaker:** the same pipeline, from apps to the real output.
 
 ## Camera
 

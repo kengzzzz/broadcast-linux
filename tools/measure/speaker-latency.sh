@@ -8,6 +8,8 @@
 # Usage: tools/measure/speaker-latency.sh [SECONDS=30]
 #   SPEAKER_EFFECTS='noise_removal = { enabled = false }'  extra [speaker] config
 #   REC_MS=40               recorder latency, which sets the period
+#   UNLOAD=5 CYCLES=3       keep the model loaded, and link, record and unlink 3 times
+#   SETTLE=8                seconds from linking to recording
 #   KEEP=file.f32           keep the recording
 # The live service must not have its speaker enabled: both would be named
 # broadcast_linux_speaker.
@@ -24,7 +26,7 @@ enabled = false
 [speaker]
 enabled = true
 output = \"spk_out\"
-unload_after_minutes = 0
+unload_after_minutes = ${UNLOAD:-0}
 ${SPEAKER_EFFECTS:-}
 
 [camera]
@@ -34,10 +36,13 @@ input=$(own broadcast_linux_speaker port playback_MONO)
 [[ -n $input ]] || { echo "test speaker not found" >&2; cat "$work/service.log" >&2; exit 1; }
 pw-link spk_in:monitor_FL spk_meas:playback_FL
 pw-link spk_out:monitor_FL spk_meas:playback_FR
-pw-link spk_in:monitor_FL "$input"
-sleep 8
-record spk_meas "$seconds"
-report
-pw-link -d spk_in:monitor_FL "$input"
-sleep 8
+for cycle in $(seq "${CYCLES:-1}"); do
+    pw-link spk_in:monitor_FL "$input"
+    sleep "${SETTLE:-8}"
+    record spk_meas "$seconds"
+    echo "-- cycle $cycle"
+    report
+    pw-link -d spk_in:monitor_FL "$input"
+    sleep 8
+done
 service_log speaker

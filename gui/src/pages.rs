@@ -1089,6 +1089,14 @@ fn setup_service(app: &mut App, ui: &mut egui::Ui) {
             whole_number(ui, &mut app.draft.service.idle_timeout_seconds, 3600);
             ui.label("seconds");
         });
+        ui.checkbox(
+            &mut app.draft.service.gpu_keep_awake,
+            "Keep the GPU awake while a mic or speaker model is loaded",
+        )
+        .on_hover_text(
+            "Fewer short gaps when an app reopens them or the GPU changes power state. \
+             Off saves some GPU power.",
+        );
         egui::CollapsingHeader::new("Service log")
             .id_salt("journal")
             .show(ui, |ui| {

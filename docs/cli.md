@@ -14,7 +14,7 @@ broadcast-linux setup
 Setup detects the GPU, downloads the matching NVIDIA Broadcast runtime and
 models, checks pinned checksums, asks you to accept NVIDIA's licence and prepares
 the Wine prefix. Allow about 8 GB of free space during setup. The NVIDIA download
-is about 2.2–2.4 GB depending on your GPU.
+is about 2.2 to 2.4 GB depending on your GPU.
 
 `--keep-installer` retains the downloaded NVIDIA installer. `--accept-eula`
 accepts NVIDIA's licence without an interactive prompt. Read the licence before

@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use pipewire as pw;
@@ -13,7 +13,7 @@ use pw::spa;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 
-use crate::config::{AudioEffect, MicConfig, SpeakerConfig, Stage};
+use crate::config::{AudioEffect, Config, Stage};
 use crate::graph;
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
@@ -36,13 +36,19 @@ const QUEUE: usize = 32;
 /// per period until it is back on.
 const SLIP: i64 = 24;
 const SLIP_RATE: usize = 64;
-/// Further behind than this, or ahead by more than the reserve, jumps instead.
+/// Output further behind than this, or further ahead than the delay, jumps to schedule.
 const JUMP_BEHIND: i64 = RATE as i64 / 10;
-/// Covers the worker's round trip for a frame, up to about 4 ms. Relies on the worker's GPU
-/// keep-awake.
+/// Covers the worker's round trip while the GPU is fast.
 const RESERVE: usize = RATE as usize / 200;
-/// Studio Voice works on every other frame, and those runs take up to 9.4 ms on an RTX 5080.
-const STUDIO_VOICE_RESERVE: usize = RATE as usize / 100;
+/// Used at start and while round trips are slow. A GPU in a low power state takes up to 7 ms.
+const SLOW_RESERVE: usize = RATE as usize / 100;
+/// Round trips in a row within `FAST_TRIP` before `RESERVE` is used. One over `SLOW_TRIP`
+/// switches back to `SLOW_RESERVE` before frames get late.
+const FAST_TRIPS: u64 = 250;
+const FAST_TRIP: Duration = Duration::from_millis(2);
+const SLOW_TRIP: Duration = Duration::from_millis(3);
+/// Studio Voice takes up to about 12 ms on every other frame (RTX 5080).
+const STUDIO_VOICE_RESERVE: usize = 3 * PERIOD;
 const MAX_RESERVE: usize = 3 * RATE as usize / 50;
 /// Late output grows the reserve by at least this, so a slow GPU costs one gap, not several.
 const RESERVE_STEP: usize = RATE as usize / 100;
@@ -138,6 +144,11 @@ struct Rt {
     /// An app is linked. Gaps only count then: PipeWire may drop a period as the last
     /// one leaves.
     linked: AtomicBool,
+    /// Worker round trips in a row within `FAST_TRIP`.
+    fast_trips: AtomicU64,
+    /// The earliest a frame ends within a capture period, and that period's length.
+    frame_end: AtomicUsize,
+    frame_period: AtomicUsize,
     stats: Stats,
 }
 
@@ -157,6 +168,7 @@ impl Rt {
                 frame: 0,
                 reserve: 0,
                 base_reserve: 0,
+                slow_reserve: 0,
                 period: 0,
                 shorter_for: 0,
                 clean_for: 0,
@@ -165,6 +177,7 @@ impl Rt {
                 used: 0,
                 last: 0.0,
                 off: 0,
+                slipping: false,
             }),
             clock: CaptureClock::default(),
             clock_valid: AtomicBool::new(false),
@@ -172,6 +185,9 @@ impl Rt {
             locked_at: AtomicI64::new(0),
             lost: AtomicU64::new(0),
             linked: AtomicBool::new(false),
+            fast_trips: AtomicU64::new(0),
+            frame_end: AtomicUsize::new(gcd(FRAME, PERIOD)),
+            frame_period: AtomicUsize::new(PERIOD),
             stats: Stats::default(),
         }
     }
@@ -197,8 +213,13 @@ impl Rt {
         let old_output = {
             let mut playback = self.playback.lock().unwrap();
             playback.frame = frame;
-            playback.reserve = reserve;
             playback.base_reserve = reserve;
+            playback.slow_reserve = if reserve == 0 {
+                0
+            } else {
+                reserve.max(SLOW_RESERVE)
+            };
+            playback.reserve = playback.slow_reserve;
             playback.shorter_for = 0;
             playback.clean_for = 0;
             playback.period = 0;
@@ -206,8 +227,10 @@ impl Rt {
             playback.next = None;
             playback.used = 0;
             playback.off = 0;
+            playback.slipping = false;
             std::mem::replace(&mut playback.ring, output)
         };
+        self.fast_trips.store(0, Ordering::Relaxed);
         drop((old_input, old_output));
     }
 
@@ -223,7 +246,11 @@ impl Rt {
         playback.next = None;
         playback.flowing_for = 0;
         playback.off = 0;
+        playback.slipping = false;
+        // The GPU may have idled while paused.
+        playback.reserve = playback.reserve.max(playback.slow_reserve);
         drop(playback);
+        self.fast_trips.store(0, Ordering::Relaxed);
     }
 }
 
@@ -239,8 +266,11 @@ struct Capture {
 }
 
 impl Capture {
-    fn take(&mut self, samples: &[[u8; 4]], stats: &Stats) {
-        for sample in samples {
+    /// If a frame ended in this period, returns the earliest any frame ends in a period of
+    /// this length.
+    fn take(&mut self, samples: &[[u8; 4]], stats: &Stats) -> Option<usize> {
+        let mut end = None;
+        for (i, sample) in samples.iter().enumerate() {
             if self.pending.len == 0 {
                 self.pending.index = self.next;
             }
@@ -248,12 +278,15 @@ impl Capture {
             self.pending.len += 1;
             self.next += 1;
             if self.pending.len == FRAME {
+                // Frame ends are spaced gcd(FRAME, period) apart across periods.
+                end = Some(i % gcd(FRAME, samples.len()) + 1);
                 self.flush(stats);
             }
         }
         if !self.whole && self.pending.len > 0 {
             self.flush(stats);
         }
+        end
     }
 
     fn flush(&mut self, stats: &Stats) {
@@ -278,9 +311,10 @@ struct Playback {
     ring: Option<FrameCons>,
     /// FRAME with effects, 0 for passthrough.
     frame: usize,
-    /// Time the worker gets per frame. Grows by a period on late output.
+    /// Time the worker gets per frame. Grows on late output and while round trips are slow.
     reserve: usize,
     base_reserve: usize,
+    slow_reserve: usize,
     /// The longest recent period.
     period: usize,
     /// Samples played in a row at a shorter period.
@@ -296,6 +330,8 @@ struct Playback {
     last: f32,
     /// Periods in a row off by enough to jump.
     off: u32,
+    /// Once started, a correction runs until exactly on schedule, not just within `SLIP`.
+    slipping: bool,
 }
 
 impl Playback {
@@ -318,26 +354,26 @@ impl Playback {
         if captured == now {
             rt.locked_at.store(now, Ordering::Relaxed);
         }
+        let locked = now - rt.locked_at.load(Ordering::Relaxed) <= 4 * period_ns;
         // Capture's input index this period. Sample counts, since graph time jumps when
         // the period or driver changes. Graph time is the fallback across drivers.
         let reference = if captured == now {
             index(start)
-        } else if now - rt.locked_at.load(Ordering::Relaxed) <= 4 * period_ns {
+        } else if locked {
             index(end)
         } else {
             index(start) + ns_to_samples(now - captured)
         };
-        // Frames only become playable at period boundaries, so a partial period would
-        // add delay but no worker time.
-        let reserve = self.period * self.reserve.div_ceil(self.period).max(1);
-        let target = reference - signed(self.frame + reserve);
+        let reserve = self.aligned(self.reserve);
+        let delay = reserve - self.early(rt, locked);
+        let target = reference - signed(self.frame + delay);
         // Gaps only count while capture delivers and an app is linked.
         let live = now - captured <= 3 * period_ns && rt.linked.load(Ordering::Relaxed);
         let flowing = rt.stats.flowing.load(Ordering::Relaxed);
         let counting = flowing && live;
 
         let correcting = (self.next.unwrap_or(target) - target).abs() > SLIP;
-        let (q, held, skipped) = self.correct(out, target, reserve, counting, rt);
+        let (q, held, skipped) = self.correct(out, target, delay, counting, rt);
         let (q, late, missing, played) = self.copy(out, held, q);
         let late = late.saturating_sub(skipped);
         if counting {
@@ -347,12 +383,29 @@ impl Playback {
             rt.stats
                 .late_samples
                 .fetch_add(late as u64, Ordering::Relaxed);
-            self.adapt_reserve(reserve, late > 0, correcting, n);
+            let fast = rt.fast_trips.load(Ordering::Relaxed) >= FAST_TRIPS;
+            self.adapt_reserve(reserve, late > 0, correcting, n, fast);
         } else if played && !flowing {
             rt.stats.flowing.store(true, Ordering::Relaxed);
         }
         self.last = f32::from_le_bytes(out[n - 1]);
         self.next = Some(q);
+    }
+
+    /// Frames only become playable at period boundaries, so a partial period would add
+    /// delay but no worker time.
+    fn aligned(&self, reserve: usize) -> usize {
+        self.period * reserve.div_ceil(self.period).max(1)
+    }
+
+    /// How much the delay can leave out of the reserve. Every frame ends at least this far
+    /// into its capture period and reaches the worker with that period, so it still gets the
+    /// whole reserve. Only while both streams share cycles.
+    fn early(&self, rt: &Rt, locked: bool) -> usize {
+        if self.frame == 0 || !locked || rt.frame_period.load(Ordering::Relaxed) != self.period {
+            return 0;
+        }
+        rt.frame_end.load(Ordering::Relaxed).min(self.period)
     }
 
     fn track_period(&mut self, n: usize) {
@@ -374,30 +427,33 @@ impl Playback {
         &mut self,
         out: &mut [[u8; 4]],
         target: i64,
-        reserve: usize,
+        delay: usize,
         counting: bool,
         rt: &Rt,
     ) -> (i64, usize, usize) {
         let mut q = self.next.unwrap_or(target);
         let ahead = q - target;
         // Two periods in a row, since one can be off at a driver switch.
-        if ahead > signed(reserve) || ahead < -JUMP_BEHIND {
+        if ahead > signed(delay) || ahead < -JUMP_BEHIND {
             self.off += 1;
             if self.off > 1 {
                 if counting {
                     rt.stats.resyncs.fetch_add(1, Ordering::Relaxed);
                 }
                 self.off = 0;
+                self.slipping = false;
                 return (target, 0, count(-ahead));
             }
             return (q, 0, 0);
         }
         self.off = 0;
+        let band = if self.slipping { 0 } else { SLIP };
+        self.slipping = ahead.abs() > band;
         let slip = count(ahead.abs()).min((out.len() / SLIP_RATE).max(1));
-        if ahead > SLIP {
+        if ahead > band {
             out[..slip].fill(self.last.to_le_bytes());
             (q, slip, 0)
-        } else if ahead < -SLIP {
+        } else if ahead < -band {
             q += signed(slip);
             (q, 0, slip)
         } else {
@@ -459,7 +515,19 @@ impl Playback {
         (q, late, missing, played)
     }
 
-    fn adapt_reserve(&mut self, reserve: usize, late: bool, correcting: bool, n: usize) {
+    fn adapt_reserve(
+        &mut self,
+        reserve: usize,
+        late: bool,
+        correcting: bool,
+        n: usize,
+        fast: bool,
+    ) {
+        let floor = if fast {
+            self.base_reserve
+        } else {
+            self.slow_reserve
+        };
         if late {
             self.clean_for = 0;
             if !correcting && self.flowing_for >= SETTLE {
@@ -467,11 +535,15 @@ impl Playback {
             }
         } else {
             self.clean_for += n;
-            if self.clean_for >= RESERVE_DECAY && self.reserve > self.base_reserve {
-                self.reserve = reserve.saturating_sub(self.period).max(self.base_reserve);
+            // Only a reserve grown by late output waits before shrinking.
+            let settled =
+                self.clean_for >= RESERVE_DECAY || reserve <= self.aligned(self.slow_reserve);
+            if settled && reserve > self.aligned(floor) {
+                self.reserve = reserve.saturating_sub(self.period).max(floor);
                 self.clean_for = 0;
             }
         }
+        self.reserve = self.reserve.max(floor);
         self.flowing_for += n;
     }
 }
@@ -484,6 +556,13 @@ fn signed(n: usize) -> i64 {
 
 fn index(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+const fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn count(n: i64) -> usize {
@@ -528,24 +607,29 @@ pub struct Settings {
     pub stages: Vec<Stage>,
     pub unload_after: Duration,
     pub name: String,
+    pub keep_awake: bool,
 }
 
 impl Settings {
-    pub fn mic(config: &MicConfig) -> Self {
+    pub fn mic(config: &Config) -> Self {
+        let mic = &config.mic;
         Self {
-            target: config.input.clone(),
-            stages: config.stages(),
-            unload_after: Duration::from_secs(config.unload_after_minutes * 60),
-            name: config.name.clone(),
+            target: mic.input.clone(),
+            stages: mic.stages(),
+            unload_after: Duration::from_secs(mic.unload_after_minutes * 60),
+            name: mic.name.clone(),
+            keep_awake: config.service.gpu_keep_awake,
         }
     }
 
-    pub fn speaker(config: &SpeakerConfig) -> Self {
+    pub fn speaker(config: &Config) -> Self {
+        let speaker = &config.speaker;
         Self {
-            target: config.output.clone(),
-            stages: config.stages(),
-            unload_after: Duration::from_secs(config.unload_after_minutes * 60),
-            name: config.name.clone(),
+            target: speaker.output.clone(),
+            stages: speaker.stages(),
+            unload_after: Duration::from_secs(speaker.unload_after_minutes * 60),
+            name: speaker.name.clone(),
+            keep_awake: config.service.gpu_keep_awake,
         }
     }
 }
@@ -864,7 +948,7 @@ impl AudioDevice {
         }
 
         let install = Installation::find(paths)?;
-        let mut args = vec!["0".to_owned()];
+        let mut args = vec![u8::from(self.settings.keep_awake).to_string()];
         for stage in &self.settings.stages {
             let (folder, file) = stage.effect.model();
             args.extend([
@@ -899,7 +983,7 @@ impl AudioDevice {
         let stdin = pipes.stdin.context("worker stdin")?;
 
         let (frame_tx, frame_rx) = mpsc::channel::<usize>();
-        let (order_tx, order_rx) = mpsc::channel::<u64>();
+        let (order_tx, order_rx) = mpsc::channel::<(u64, Instant)>();
         let kind = self.kind;
         let events = self.events.clone();
         {
@@ -924,7 +1008,7 @@ impl AudioDevice {
                     out_prod,
                     &order_rx,
                     &shared,
-                    &rt.stats,
+                    &rt,
                     &events,
                     kind,
                     id,
@@ -1095,7 +1179,10 @@ fn capture_process(stream: &pw::stream::Stream, rt: &Rt) {
         capture.pending.len = 0;
     }
     let start = capture.next;
-    capture.take(samples, &rt.stats);
+    if let Some(end) = capture.take(samples, &rt.stats) {
+        rt.frame_end.store(end, Ordering::Relaxed);
+        rt.frame_period.store(samples.len(), Ordering::Relaxed);
+    }
     if now != 0 {
         rt.clock.publish(start, capture.next, now);
         rt.clock_valid.store(true, Ordering::Release);
@@ -1193,7 +1280,7 @@ fn feed_worker(
     mut stdin: impl Write,
     mut ring: FrameCons,
     frame: &mpsc::Receiver<usize>,
-    order: &mpsc::Sender<u64>,
+    order: &mpsc::Sender<(u64, Instant)>,
     shared: &Shared,
     stats: &Stats,
 ) {
@@ -1227,7 +1314,7 @@ fn feed_worker(
             *b = s.to_le_bytes();
         }
         // The drain thread pairs each output frame with these indices in order.
-        if order.send(frame.index).is_err()
+        if order.send((frame.index, Instant::now())).is_err()
             || stdin
                 .write_all(&bytes)
                 .and_then(|()| stdin.flush())
@@ -1243,9 +1330,9 @@ fn feed_worker(
 fn drain_worker(
     mut stdout: impl Read,
     mut ring: FrameProd,
-    order: &mpsc::Receiver<u64>,
+    order: &mpsc::Receiver<(u64, Instant)>,
     shared: &Shared,
-    stats: &Stats,
+    rt: &Rt,
     events: &EventSender,
     kind: Kind,
     session: u64,
@@ -1264,12 +1351,18 @@ fn drain_worker(
             frame.samples[frame.len] = f32::from_le_bytes(*sample);
             frame.len += 1;
             if frame.len == FRAME {
-                let Ok(index) = order.recv() else {
+                let Ok((index, sent)) = order.recv() else {
                     break 'read;
                 };
                 frame.index = index;
+                let trip = sent.elapsed();
+                if trip > SLOW_TRIP {
+                    rt.fast_trips.store(0, Ordering::Relaxed);
+                } else if trip <= FAST_TRIP {
+                    rt.fast_trips.fetch_add(1, Ordering::Relaxed);
+                }
                 if ring.try_push(frame).is_err() {
-                    stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                    rt.stats.dropped_frames.fetch_add(1, Ordering::Relaxed);
                 }
                 frame.len = 0;
                 shared.received.fetch_add(1, Ordering::Relaxed);
@@ -1308,5 +1401,161 @@ struct PodBytes(Vec<u8>);
 impl PodBytes {
     fn as_pod(&self) -> &spa::pod::Pod {
         spa::pod::Pod::from_bytes(&self.0).expect("serialized pod")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playback(reserve: usize) -> Playback {
+        let mut p = Rt::new().playback.into_inner().unwrap();
+        p.period = PERIOD;
+        p.base_reserve = reserve;
+        p.slow_reserve = reserve.max(SLOW_RESERVE);
+        p.reserve = p.slow_reserve;
+        p.flowing_for = SETTLE;
+        p
+    }
+
+    /// Adapts the reserve for `seconds` and returns it rounded up to whole periods.
+    fn run(p: &mut Playback, seconds: usize, fast: bool) -> usize {
+        for _ in 0..seconds * RATE as usize / PERIOD {
+            p.adapt_reserve(p.aligned(p.reserve), false, false, PERIOD, fast);
+        }
+        p.aligned(p.reserve)
+    }
+
+    #[test]
+    fn reserve_follows_round_trips() {
+        let mut p = playback(RESERVE);
+        assert_eq!(run(&mut p, 1, false), 2 * PERIOD);
+        assert_eq!(run(&mut p, 1, true), PERIOD);
+        assert_eq!(run(&mut p, 1, false), 2 * PERIOD);
+    }
+
+    #[test]
+    fn late_growth_waits_a_clean_minute() {
+        let mut p = playback(RESERVE);
+        run(&mut p, 1, true);
+        p.adapt_reserve(p.aligned(p.reserve), true, false, PERIOD, true);
+        let grown = p.aligned(p.reserve);
+        assert_eq!(grown, 3 * PERIOD);
+        assert_eq!(run(&mut p, 30, true), grown);
+        assert_eq!(run(&mut p, 31, true), PERIOD);
+    }
+
+    #[test]
+    fn a_correction_ends_exactly_on_schedule() {
+        let rt = Rt::new();
+        let mut p = playback(RESERVE);
+        let mut out = [[0; 4]; PERIOD];
+        let mut target = 10_000;
+        p.next = Some(target - signed(PERIOD));
+        for _ in 0..100 {
+            let (q, held, _) = p.correct(&mut out, target, 2 * PERIOD, true, &rt);
+            target += signed(PERIOD);
+            p.next = Some(q + signed(PERIOD - held));
+        }
+        assert_eq!(p.next, Some(target));
+    }
+
+    #[test]
+    fn studio_voice_keeps_its_reserve() {
+        let mut p = playback(STUDIO_VOICE_RESERVE);
+        assert_eq!(run(&mut p, 1, true), 3 * PERIOD);
+    }
+
+    #[test]
+    fn a_larger_reserve_slips_instead_of_jumping() {
+        let rt = Rt::new();
+        let mut p = playback(RESERVE);
+        p.next = Some(10_000);
+        let mut out = [[0; 4]; PERIOD];
+        let target = 10_000 - signed(PERIOD);
+        assert_eq!(
+            p.correct(&mut out, target, 2 * PERIOD, true, &rt),
+            (10_000, PERIOD / SLIP_RATE, 0)
+        );
+        assert_eq!(rt.stats.resyncs.load(Ordering::Relaxed), 0);
+    }
+
+    /// Simulates capture, a worker that returns each frame `trip` periods after the one it
+    /// ended in, and playback. Returns the gap samples once audio flows, and the delay
+    /// beyond one frame.
+    fn simulate(period: usize, reserve: usize, trip: usize, capture_first: bool) -> (u64, i64) {
+        let rt = Rt::new();
+        let (input, mut worker_in) = HeapRb::<Frame>::new(QUEUE).split();
+        let (mut worker_out, output) = HeapRb::<Frame>::new(QUEUE).split();
+        rt.connect(Some(input), true, Some(output), FRAME, reserve);
+        {
+            let mut playback = rt.playback.lock().unwrap();
+            playback.slow_reserve = reserve;
+            playback.reserve = reserve;
+        }
+        rt.linked.store(true, Ordering::Relaxed);
+        let samples = vec![[0; 4]; period];
+        let mut out = vec![[0; 4]; period];
+        let mut working = std::collections::VecDeque::new();
+        let cycle_ns = 1_000_000_000 * signed(period) / i64::from(RATE);
+        let mut start = 0;
+        for cycle in 1..40 * FRAME / period {
+            let now = signed(cycle) * cycle_ns;
+            while working.front().is_some_and(|&(due, _)| due <= cycle) {
+                let _ = worker_out.try_push(working.pop_front().unwrap().1);
+            }
+            let capture = || {
+                let mut capture = rt.capture.lock().unwrap();
+                let start = capture.next;
+                if let Some(end) = capture.take(&samples, &rt.stats) {
+                    rt.frame_end.store(end, Ordering::Relaxed);
+                    rt.frame_period.store(period, Ordering::Relaxed);
+                }
+                rt.clock.publish(start, capture.next, now);
+                rt.clock_valid.store(true, Ordering::Release);
+                start
+            };
+            if capture_first {
+                start = capture();
+            }
+            rt.playback.lock().unwrap().fill(&mut out, now, &rt);
+            if !capture_first {
+                start = capture();
+                rt.locked_at.store(now, Ordering::Relaxed);
+            }
+            while let Some(frame) = worker_in.try_pop() {
+                working.push_back((cycle + trip, frame));
+            }
+        }
+        let next = rt.playback.lock().unwrap().next.unwrap();
+        let gaps = rt.stats.late_samples.load(Ordering::Relaxed)
+            + rt.stats.underrun_samples.load(Ordering::Relaxed);
+        (gaps, index(start) + signed(period) - signed(FRAME) - next)
+    }
+
+    #[test]
+    fn every_frame_gets_the_reserve_with_the_least_delay() {
+        for capture_first in [true, false] {
+            for (period, reserve, early) in [
+                (PERIOD, RESERVE, 128),
+                (PERIOD, SLOW_RESERVE, 128),
+                (PERIOD, STUDIO_VOICE_RESERVE, 128),
+                (512, RESERVE, 128),
+                (960, RESERVE, 960),
+            ] {
+                let periods = reserve.div_ceil(period);
+                let case = format!("{period} {reserve} {capture_first}");
+                let (gaps, delay) = simulate(period, reserve, periods, capture_first);
+                assert_eq!(
+                    (gaps, delay),
+                    (0, signed(periods * period - early)),
+                    "{case}"
+                );
+                assert!(
+                    simulate(period, reserve, periods + 1, capture_first).0 > 0,
+                    "{case}"
+                );
+            }
+        }
     }
 }

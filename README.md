@@ -22,10 +22,9 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 - Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
   or higher
 
-Only tested on an RTX 50 card. NVIDIA ships a separate installer for each GPU generation,
-RTX 20 to RTX 50. Their 43 program DLLs are byte-identical apart from the signature, and
-only the AI model files are built per generation, so RTX 20, 30 and 40 cards should work
-too. Reports are welcome in [issue #1](https://github.com/kengzzzz/broadcast-linux/issues/1).
+Only tested on an RTX 50 card. NVIDIA's installers for RTX 20 to 50 differ only in their
+AI model files and DLL signatures, so RTX 20, 30 and 40 cards should work too. Reports are
+welcome in [issue #1](https://github.com/kengzzzz/broadcast-linux/issues/1).
 
 ### Linux app
 
@@ -37,6 +36,9 @@ too. Reports are welcome in [issue #1](https://github.com/kengzzzz/broadcast-lin
 - Wayland or X11 desktop session with OpenGL
 - 8 GB free disk space and internet access during setup
 - The virtual camera requires v4l2loopback >= 0.12.6 and your user in the `video` group
+
+Optional: `rtkit` avoids short mic and speaker gaps while the CPU is fully busy. Most
+desktops already have it. If you install it, log out and back in.
 
 ## Install
 
@@ -93,7 +95,7 @@ sudo usermod -aG video "$USER"
 
 1. Open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`.
 2. On **Setup**, click **Download and install** and accept NVIDIA's licence.
-   The download is about 2.2–2.4 GB depending on your GPU. Start the service on the same page.
+   The download is about 2.2 to 2.4 GB depending on your GPU. Start the service on the same page.
 3. Choose your devices and effects, then **Apply**. For the camera, follow the
    **Camera** page's module and permission steps. Log in again after joining the video group.
 4. In your call or recording app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.

@@ -155,11 +155,11 @@ fn start_audio(
     let mut audio = Vec::new();
     let mut speaker_error = None;
     if config.mic.enabled {
-        let settings = Settings::mic(&config.mic);
+        let settings = Settings::mic(config);
         audio.push(AudioDevice::new(Kind::Mic, core, settings, events.clone())?);
     }
     if config.speaker.enabled {
-        let settings = Settings::speaker(&config.speaker);
+        let settings = Settings::speaker(config);
         match AudioDevice::new(Kind::Speaker, core, settings, events.clone()) {
             Ok(speaker) => audio.push(speaker),
             Err(e) => {
@@ -353,8 +353,8 @@ impl State {
         eprintln!("reload: {}", self.paths.config.display());
         for d in &mut self.audio {
             let settings = match d.kind() {
-                Kind::Mic => Settings::mic(&config.mic),
-                Kind::Speaker => Settings::speaker(&config.speaker),
+                Kind::Mic => Settings::mic(&config),
+                Kind::Speaker => Settings::speaker(&config),
             };
             if d.set_settings(settings) {
                 d.stop();

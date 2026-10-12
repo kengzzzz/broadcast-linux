@@ -11,6 +11,7 @@
 #   REC_MS=40               recorder latency, which sets the period (10 ms gives 256, 40 gives 512)
 #   FORCE_Q=960             force the test group's period, FORCE_Q2=256 FORCE_AT=8 to switch it
 #   UNLOAD=5 CYCLES=3       keep the model loaded, and link, record and unlink 3 times
+#   SETTLE=8                seconds from linking to recording
 #   KEEP=file.f32           keep the last recording
 source "$(dirname -- "${BASH_SOURCE[0]}")/beside.sh"
 seconds=${1:-30}
@@ -36,7 +37,7 @@ pw-link "${REF:-bltest_in:monitor_FL}" bltest_meas:playback_FL
 [[ -n ${FORCE_Q:-} ]] && force "$FORCE_Q" bltest_meas
 for cycle in $(seq "${CYCLES:-1}"); do
     pw-link "$port" bltest_meas:playback_FR
-    sleep 8
+    sleep "${SETTLE:-8}"
     record bltest_meas "$seconds"
     echo "-- cycle $cycle"
     report

@@ -9,15 +9,20 @@ both systems. Linux: driver 615.78, PipeWire 1.6. Windows 11: driver 616.92.
 
 | Path | min | avg | p95 | p99 |
 |---|---|---|---|---|
-| Mic, noise removal | 115.3 | 115.3 | 115.3 | 115.3 |
-| Mic, Studio Voice | 89.2 | 90.3 | 90.8 | 90.8 |
+| Mic, noise removal | 112.7 | 112.7 | 112.7 | 112.7 |
+| Mic, Studio Voice | 92.3 | 92.5 | 92.8 | 93.0 |
 | Mic, no effects | 5.3 | 5.3 | 5.3 | 5.3 |
-| Speaker, noise removal | 115.3 | 115.3 | 115.3 | 115.3 |
+| Speaker, noise removal | 112.7 | 112.7 | 112.7 | 112.7 |
 | Speaker, no effects | 5.3 | 5.3 | 5.3 | 5.3 |
 
-Noise removal is 70 ms model look-ahead + 40 ms model frame + 5.3 ms reserve (one
-256-sample period). Studio Voice gets two periods. A forced larger period raises the
-reserve: 121 ms at 512 samples, 130 ms at 960.
+Noise removal is 70 ms model look-ahead + 40 ms model frame + 2.7 ms: one 5.3 ms period
+of worker time, less half a period ([why](architecture.md#audio)). Other cases:
+
+| Noise removal | Delay |
+|---|---|
+| First 10 s, or GPU slow or busy (camera effects on) | 118.0 |
+| Forced 512-sample periods | 118.0 |
+| Forced 960-sample periods, where frames end with a period | 110.0 |
 
 ### Camera delay, ms
 
@@ -64,8 +69,7 @@ clock the GPU keeps up, and both give about 46.5 ms.
 | Speaker, noise removal | 151.0 | 151.0 | 151.1 | 151.1 |
 | Speaker, no effects | 80.8 | 86.4 | 91.0 | 91.0 |
 
-The min is the fastest Broadcast managed. Most of its noise removal runs were 115.6 to
-124 ms, and the average is higher because of two longer runs at 173 ms.
+Most noise removal runs were 115.6 to 124 ms. Two runs at 173 ms raise the average.
 
 ### Resources
 
@@ -77,19 +81,22 @@ The min is the fastest Broadcast managed. Most of its noise removal runs were 11
 
 ## How it was measured
 
-- Delay is the processed audio behind the raw audio, over every 5 s window of every run.
-  Studio Voice regenerates the voice, so its delay comes from loudness envelopes. The
-  others come from waveform cross-correlation.
-- Every run is 30 s or longer. Linux: `tools/measure`, each run in a fresh instance. Mic
-  noise removal and Studio Voice mixed sound played from headphones held against the mic
-  with a digital feed, and both gave the same delay. The rest were digital. Windows:
-  `tools/winbench`, headphones against the mic, with Broadcast left running between runs.
-- CPU is summed over every process doing the work. GPU is the whole card's power draw,
-  because utilization % changes with the clock and can't be compared.
-- Linux's mic GPU power includes the keep-awake that holds the GPU at P3 while an app
-  has the mic open. Windows stays at P5 without late frames.
-- The camera ran at 29.8 fps on Linux and 29.5 fps on Windows.
-- Camera delay on a slower GPU: `tools/camera-latency`, 30 s each, from the webcam's
-  capture timestamp to the processed frame. GPU locked with `nvidia-smi -lgc 600,600`.
-- RTX 20, 30 and 40 cards aren't measured. Their audio models are separate builds of the
-  same versions, so the look-ahead should match. A slower GPU may need a longer reserve.
+- **Delay:** processed audio behind raw audio, per 5 s window of every run. Waveform
+  cross-correlation, except Studio Voice, which regenerates the voice and uses loudness
+  envelopes.
+- **Runs:** 30 s or longer. Linux: `tools/measure`, digital, a fresh instance per run,
+  recording from 15 s after the app links. Headphones held against the mic gave the same
+  noise removal and Studio Voice delay. Windows: `tools/winbench`, headphones against the mic, Broadcast left running.
+- **Dropouts:** with rtkit, no gap over 2 ms at a fixed buffer size, in 30 min runs,
+  digital and on the real mic, also beside the camera effects, and 10 min under a full CPU
+  load.
+- **CPU:** summed over every process doing the work. **GPU:** the whole card's power
+  draw, since utilization % changes with the clock.
+- **Keep-awake:** Linux's mic GPU power includes it. It usually holds the GPU at P3 while
+  the model is loaded. Windows stays at P5 without late frames.
+- **Camera:** 29.8 fps on Linux, 29.5 fps on Windows. Slower GPU: `tools/camera-latency`,
+  30 s each, from the webcam's capture timestamp to the processed frame, GPU locked with
+  `nvidia-smi -lgc 600,600`.
+- **Other GPUs:** RTX 20, 30 and 40 aren't measured. Their audio models are separate
+  builds of the same versions, so the look-ahead should match. A slower GPU may need a
+  longer reserve.

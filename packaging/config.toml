@@ -16,7 +16,8 @@ room_echo_removal = { enabled = false, strength = 1.0 }
 # Studio mic voice; overrides noise/echo removal. No strength option.
 studio_voice = { enabled = false }
 # Whole minutes to retain the idle mic model after pausing; 0 = unload on pause.
-unload_after_minutes = 10
+# With gpu_keep_awake, the model runs on silence until then.
+unload_after_minutes = 2
 # Device name shown to apps (any string).
 name = "NVIDIA Broadcast Mic"
 
@@ -28,7 +29,7 @@ output = "default"
 noise_removal = { enabled = true, strength = 1.0 }
 room_echo_removal = { enabled = false, strength = 1.0 }
 # Same as [mic] unload_after_minutes.
-unload_after_minutes = 10
+unload_after_minutes = 2
 name = "NVIDIA Broadcast Speaker"
 
 [camera]
@@ -70,3 +71,6 @@ auto_frame = { enabled = false }
 [service]
 # Whole seconds after last reader: pause mic / stop camera; 0 = immediately.
 idle_timeout_seconds = 5
+# Keep the GPU awake while a mic or speaker model is loaded, for fewer short gaps.
+# false saves some GPU power.
+gpu_keep_awake = true

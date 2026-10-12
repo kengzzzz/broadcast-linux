@@ -14,10 +14,9 @@ git submodule update --init
 ./build.sh
 ```
 
-The output is `build/stage`, containing the CLI, settings window, patched nvcuda
-relay and Wine workers. You can supply a different output directory as the first
-argument to `build.sh`. This stages binaries. Use a package or release tarball for
-the desktop entry, config and systemd unit.
+The output is `build/stage` (or `build.sh`'s first argument): the CLI, settings window,
+patched nvcuda relay and Wine workers. For the desktop entry, config and systemd unit,
+use a package or the release tarball.
 
 On Arch Linux, build and install the source package instead:
 
@@ -61,23 +60,26 @@ cargo clippy --locked --workspace --all-targets -- -D warnings -W clippy::pedant
 cargo test --locked --workspace
 ```
 
-For a release, align the workspace version in `Cargo.toml`, `Cargo.lock` and both
-`PKGBUILD` files with the `v<version>` tag. Rename `## Unreleased` in
-[CHANGELOG.md](../CHANGELOG.md) to `## <version> - <date>`. That section becomes
-the release notes. Pushing a `v*` tag builds the tarball, the `.deb` and the `.rpm`,
-installs the packages on Debian 13, Ubuntu 26.04 and Fedora 44, then publishes all three
-with `SHA256SUMS` and the top-level `install.sh`, which picks the right one for the user's distribution.
+For a release:
 
-See [AUR publishing](../packaging/README.md) for publishing the binary package.
+1. Set the version in `Cargo.toml`, `Cargo.lock` and both `PKGBUILD` files.
+2. Rename `## Unreleased` in [CHANGELOG.md](../CHANGELOG.md) to `## <version> - <date>`.
+   That section becomes the release notes.
+3. Push a `v<version>` tag. CI builds the tarball, `.deb` and `.rpm`, test-installs the
+   packages on Debian 13, Ubuntu 26.04 and Fedora 44, and publishes them with
+   `SHA256SUMS` and `install.sh`, which picks the right one for each distribution.
+4. Publish the AUR binary package: see [AUR publishing](../packaging/README.md).
 
 ## Updating NVIDIA Broadcast
 
-The `nvidia-update` workflow runs every Monday and can be started by hand. When
-NVIDIA's Broadcast page offers a newer build, it opens an issue with the new installer
-entries and checks that each installer still has the files the code names. It also
-fails when a pinned NVIDIA installer is gone or has changed size, because setup then
-breaks for new users. Run the same check locally with `ci/nvidia-update.sh report.md`. It needs
-7-Zip and downloads about 9 GB when a new build exists.
+The `nvidia-update` workflow runs every Monday, or by hand:
+
+- A newer build on NVIDIA's Broadcast page opens an issue with the new installer
+  entries, and checks each installer still has the files the code names.
+- It fails when a pinned installer is gone or changed size, since setup then breaks for
+  new users.
+- Locally: `ci/nvidia-update.sh report.md`. Needs 7-Zip, and downloads about 9 GB when a
+  new build exists.
 
 To move to a new build:
 
@@ -85,8 +87,7 @@ To move to a new build:
 2. If the issue lists missing files, update the model folder and file names in
    `src/nvidia.rs` and `src/config.rs`, or the paths `extract` keeps in `src/setup.rs`.
 3. Run setup, then test every microphone, speaker and camera effect on a GPU. A newer
-   CUDA runtime in NVIDIA's files can ask for a driver export table that the bundled
-   nvcuda relay lacks, like the one `patches/nvcuda-export-table-d2688bf2.patch` adds.
-   That only shows up when an effect starts.
-4. Add a CHANGELOG entry. Users rerun setup after upgrading, and setup then removes
-   the previous build's files.
+   CUDA runtime can need a driver export table the nvcuda relay lacks, like the one
+   `patches/nvcuda-export-table-d2688bf2.patch` adds. It only fails when an effect starts.
+4. Add a CHANGELOG entry. Users rerun setup after upgrading, which removes the previous
+   build's files.

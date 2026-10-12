@@ -2,9 +2,15 @@
 
 ## Unreleased
 
-Lower camera delay on slower GPUs.
+Lower camera delay on slower GPUs, and lower mic and speaker delay with fewer short gaps.
 
-- Camera: less delay when the GPU can't keep up with the webcam. Each frame is now decoded just before the GPU is free, instead of waiting in line.
+- Camera: less delay when the GPU can't keep up with the webcam. Each frame is decoded just before the GPU is free, instead of waiting in line.
+- Mic and speaker: 2.7 ms less delay with noise or echo removal.
+- Mic and speaker: no short gap when an app reopens them. The model runs on silence until it unloads, so the GPU doesn't idle.
+- Mic and speaker: `unload_after_minutes` defaults to 2, since the GPU stays awake until then. Existing configs keep their value, often the old default of 10.
+- Mic and speaker: no short gap while the GPU is in a slower power state. The delay is 5.3 ms longer for the first 10 s and while the GPU is slow or busy, for example with the camera effects on.
+- Mic: no more short gaps every few minutes with Studio Voice. Its delay is 2.7 ms longer than in 0.4.3.
+- Mic and speaker: new `gpu_keep_awake` setting (Service page). Off saves some GPU power, but an app reopening the mic or speaker may get a short gap.
 
 ## 0.4.3 - 2026-10-10
 

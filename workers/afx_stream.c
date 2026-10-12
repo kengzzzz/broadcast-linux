@@ -4,6 +4,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 #include <windows.h>
 
 typedef int (WINAPI *create_effect_fn)(const char *, void **);
@@ -20,6 +21,8 @@ static int read_full(float *buf, size_t count);
 /* windows.h pulls in winsock.h, which redefines FIONREAD to the Windows value */
 #define LINUX_FIONREAD 0x541B
 #define WARMUP_FRAMES 10
+/* Run on silence after this many 40 ms waits without input. */
+#define IDLE_POLLS 3
 
 static size_t pending_bytes(void) {
     int bytes = 0;
@@ -58,8 +61,17 @@ struct stage {
     double max_ms;
 };
 
+static void run_chain(struct stage *stages, int count, run_fn run, const float *in, unsigned int frame) {
+    for (int i = 0; i < count; i++) {
+        const float *in_ptrs[1] = {in};
+        float *out_ptrs[1] = {stages[i].out};
+        run(stages[i].effect, in_ptrs, out_ptrs, frame, 1);
+        in = stages[i].out;
+    }
+}
+
 /* With only an audio model on the GPU, the driver may keep switching power states, and runs
- * near a switch take up to 25 ms. Clearing 128 MB per frame holds P3 or above while audio
+ * near a switch take up to 25 ms. Clearing 128 MB per frame usually holds P3 while audio
  * flows. Smaller clears made the switching worse. */
 #define KEEPAWAKE_BYTES (128u << 20)
 #define CU_STREAM_NON_BLOCKING 1
@@ -98,11 +110,11 @@ static int keepawake_start(struct keepawake *k) {
 
 int main(int argc, char **argv) {
     if (argc < 5 || (argc - 2) % 3) {
-        fprintf(stderr, "Usage: %s CUSHION_MS EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n",
+        fprintf(stderr, "Usage: %s KEEP_AWAKE EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n",
                 argv[0]);
         return 2;
     }
-    unsigned int cushion_ms = (unsigned int)atoi(argv[1]);
+    int keep_awake = atoi(argv[1]);
     int count = (argc - 2) / 3;
     setvbuf(stdin, NULL, _IONBF, 0);
     /* a small output pipe pushes any backlog back to stdin, where drop_backlog discards it */
@@ -163,18 +175,12 @@ int main(int argc, char **argv) {
         strncat(names, st->name, sizeof(names) - strlen(names) - 1);
     }
     float *in_buf = calloc(frame, sizeof(float));
+    float *silence = calloc(frame, sizeof(float));
     /* the first runs of each model are several times slower; take that hit before audio flows */
-    for (int n = 0; n < WARMUP_FRAMES; n++) {
-        const float *cur = in_buf;
-        for (int i = 0; i < count; i++) {
-            const float *in_ptrs[1] = {cur};
-            float *out_ptrs[1] = {stages[i].out};
-            run(stages[i].effect, in_ptrs, out_ptrs, frame, 1);
-            cur = stages[i].out;
-        }
-    }
+    for (int n = 0; n < WARMUP_FRAMES; n++)
+        run_chain(stages, count, run, silence, frame);
     struct keepawake keepawake = {0};
-    if (keepawake_start(&keepawake)) {
+    if (keep_awake && keepawake_start(&keepawake)) {
         keepawake.memset_async = NULL;
         fprintf(stderr, "Could not start the GPU keep-awake; runs may be slow while the GPU idles\n");
     }
@@ -187,9 +193,21 @@ int main(int argc, char **argv) {
     dropped = drop_backlog(in_buf, frame);
     fprintf(stderr, "Dropped %lu stale frames queued during startup\n", dropped);
     dropped = 0;
-    unsigned int cushion = cushion_ms * 48;
 
-    while (read_full(in_buf, frame)) {
+    for (;;) {
+        /* With no input until the model unloads, run on silence so the GPU stays awake.
+         * An idle GPU stalls 20 to 30 ms when audio returns. */
+        if (keepawake.memset_async) {
+            struct pollfd input = {fileno(stdin), POLLIN, 0};
+            for (int polls = 1; poll(&input, 1, 40) == 0; polls++) {
+                if (polls >= IDLE_POLLS) {
+                    run_chain(stages, count, run, silence, frame);
+                    keepawake.memset_async(keepawake.buf, 0, KEEPAWAKE_BYTES / 4, keepawake.stream);
+                }
+            }
+        }
+        if (!read_full(in_buf, frame))
+            break;
         dropped += drop_backlog(in_buf, frame);
         const float *cur = in_buf;
         for (int i = 0; i < count; i++) {
@@ -208,12 +226,6 @@ int main(int argc, char **argv) {
                 memcpy(st->out, cur, frame * sizeof(float));
             }
             cur = st->out;
-        }
-        if (!frames && cushion) {
-            /* silence ahead of the first frame gives the reader slack for jitter */
-            float *silence = calloc(cushion, sizeof(float));
-            fwrite(silence, sizeof(float), cushion, stdout);
-            free(silence);
         }
         if (fwrite(cur, sizeof(float), frame, stdout) != frame)
             break;

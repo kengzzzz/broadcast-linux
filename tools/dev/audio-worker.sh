@@ -19,7 +19,7 @@ done
 ffmpeg -nostdin -loglevel error -y -i "$in" -ac 1 -ar 48000 -f f32le "$out/$name.in.f32"
 cd "$runtime"
 python3 "$repo/tools/dev/pace.py" "$out/$name.in.f32" \
-    | env "${wine_env[@]}" wine "$libdir/workers/afx_stream.exe.so" 0 "${args[@]}" \
+    | env "${wine_env[@]}" wine "$libdir/workers/afx_stream.exe.so" 1 "${args[@]}" \
         2> "$out/$name.log" > "$out/$name.f32"
 ffmpeg -nostdin -loglevel error -y -f f32le -ar 48000 -ac 1 -i "$out/$name.f32" "$out/$name.wav"
 rm -f "$out/$name.in.f32" "$out/$name.f32"

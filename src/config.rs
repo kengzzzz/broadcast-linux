@@ -99,7 +99,7 @@ impl Default for MicConfig {
                 ..Adjustable::default()
             },
             studio_voice: Toggle { enabled: false },
-            unload_after_minutes: 10,
+            unload_after_minutes: 2,
             name: "NVIDIA Broadcast Mic".into(),
         }
     }
@@ -136,7 +136,7 @@ impl Default for SpeakerConfig {
                 enabled: false,
                 ..Adjustable::default()
             },
-            unload_after_minutes: 10,
+            unload_after_minutes: 2,
             name: "NVIDIA Broadcast Speaker".into(),
         }
     }
@@ -357,12 +357,14 @@ impl Default for CameraConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
     pub idle_timeout_seconds: u64,
+    pub gpu_keep_awake: bool,
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             idle_timeout_seconds: 5,
+            gpu_keep_awake: true,
         }
     }
 }
@@ -416,9 +418,10 @@ mod tests {
         assert!(config.mic.noise_removal.enabled);
         assert!(!config.mic.room_echo_removal.enabled);
         assert_eq!(config.mic.input, "alsa_input.usb");
-        assert_eq!(config.mic.unload_after_minutes, 10);
+        assert_eq!(config.mic.unload_after_minutes, 2);
         assert!(toml::from_str::<Config>("[mic]\nkeep_loaded = true").is_err());
         assert_eq!(config.service.idle_timeout_seconds, 5);
+        assert!(config.service.gpu_keep_awake);
     }
 
     fn stages(toml: &str) -> Vec<(AudioEffect, f32)> {
