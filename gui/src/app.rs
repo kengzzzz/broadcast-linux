@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use broadcast_linux::config::{self, Config};
 use broadcast_linux::doctor::{self, Report};
 use broadcast_linux::graph::AudioNode;
+use broadcast_linux::nvidia::{Feature, Installation};
 use broadcast_linux::paths::Paths;
 use broadcast_linux::status::{Device, State, Status};
 use broadcast_linux::webcam::{self, Webcam};
@@ -46,6 +47,8 @@ pub struct Checks {
     /// Why setup must run, if it must.
     pub setup_needed: Option<String>,
     pub report: Report,
+    /// Why each of these effects can't run with the installed files.
+    pub missing: Vec<(Feature, String)>,
 }
 
 pub struct App {
@@ -273,10 +276,20 @@ impl App {
                 Ok(gpu) => setup::needed(&paths, gpu.generation),
                 Err(e) => Some(e.clone()),
             };
+            let missing = Installation::find(&paths).map_or_else(
+                |_| Vec::new(),
+                |install| {
+                    Feature::ALL
+                        .into_iter()
+                        .filter_map(|feature| Some((feature, install.missing(feature)?)))
+                        .collect()
+                },
+            );
             let checks = Checks {
                 gpu: gpu.map(|g| format!("{} ({})", g.name, g.generation)),
                 setup_needed,
                 report: doctor::check(&paths),
+                missing,
             };
             let _ = tx.send(checks);
             ctx.request_repaint();
@@ -290,6 +303,13 @@ impl App {
 
     pub fn setup_needed(&self) -> Option<&str> {
         self.checks.as_ref()?.setup_needed.as_deref()
+    }
+
+    /// Why `feature` can't run, once the checks have looked.
+    pub fn missing(&self, feature: Feature) -> Option<String> {
+        let checks = self.checks.as_ref()?;
+        let (_, reason) = checks.missing.iter().find(|(f, _)| *f == feature)?;
+        Some(reason.clone())
     }
 
     pub fn spawn(
@@ -309,6 +329,11 @@ impl App {
     }
 
     pub fn apply(&mut self, overwrite: bool, ctx: &egui::Context) {
+        // The service would refuse the whole file.
+        if let Err(e) = self.draft.camera.validate() {
+            self.fail(format!("{e:#}"));
+            return;
+        }
         let restart = self.restart_needed();
         let Ok(file) = &mut self.file else {
             return;

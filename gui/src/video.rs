@@ -1,4 +1,8 @@
-use broadcast_linux::config::{CameraConfig, InputColor, InputFormat, LightPreset, ParallelDecode};
+use broadcast_linux::config::{
+    CameraConfig, FrameGenerationMode, InputColor, InputFormat, LightPreset, ParallelDecode,
+    SuperResolutionMode,
+};
+use broadcast_linux::nvidia::Feature;
 use broadcast_linux::webcam::{Format, Webcam};
 use eframe::egui::{self, RichText, Sense, vec2};
 
@@ -168,6 +172,118 @@ fn camera_effects(app: &mut App, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         app.pick_background(&ctx);
     }
+    rtx_video_effects(app, ui);
+}
+
+/// Rows for effects some GPUs' files lack, greyed out with the reason while they are off.
+fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
+    let camera = &app.draft.camera;
+    let (width, height, fps) = (camera.width, camera.height, camera.fps);
+    let source = app
+        .webcams
+        .iter()
+        .find(|w| w.path == camera.input)
+        .map(|w| w.upscale_source(camera.input_format, width, height));
+    let upscale_missing = app.missing(Feature::SuperResolution).or_else(|| {
+        matches!(source, Some(None)).then(|| {
+            format!("Your webcam has no size smaller than {width} × {height} with the same shape.")
+        })
+    });
+    let generation_missing = app.missing(Feature::FrameGeneration);
+    let draft = &mut app.draft.camera;
+    ui.add_enabled_ui(draft.enabled, |ui| {
+        let upscale = &mut draft.super_resolution;
+        ui.add_enabled_ui(upscale_missing.is_none() || upscale.enabled, |ui| {
+            effect_row(
+                ui,
+                "camera-super-res",
+                "Super Resolution",
+                upscale_missing.as_deref().unwrap_or(
+                    "Captures your webcam at a lower resolution and upscales it with AI.",
+                ),
+                &mut upscale.enabled,
+                Some(&mut |ui: &mut egui::Ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Mode");
+                        ui.radio_value(&mut upscale.mode, SuperResolutionMode::Quality, "Quality");
+                        ui.radio_value(
+                            &mut upscale.mode,
+                            SuperResolutionMode::Performance,
+                            "Performance",
+                        );
+                    });
+                    if let Some(Some((w, h))) = source {
+                        ui.label(
+                            RichText::new(format!("Captures {w} × {h} for {width} × {height}."))
+                                .small()
+                                .color(theme::MUTED),
+                        );
+                    }
+                }),
+            );
+        });
+        let generation = &mut draft.frame_generation;
+        ui.add_enabled_ui(generation_missing.is_none() || generation.enabled, |ui| {
+            effect_row(
+                ui,
+                "camera-frame-gen",
+                "Frame Generation",
+                generation_missing.as_deref().unwrap_or(
+                    "Runs your webcam at a lower frame rate and makes the frames in between with AI.",
+                ),
+                &mut generation.enabled,
+                Some(&mut |ui: &mut egui::Ui| {
+                    generation_options(ui, &mut generation.multiplier, &mut generation.mode, fps);
+                }),
+            );
+        });
+        // The service refuses a frame rate the multiplier doesn't divide.
+        if generation.enabled
+            && !fps.is_multiple_of(generation.multiplier)
+            && let Some(multiplier) = (2..=4).rev().find(|&m| fps.is_multiple_of(m))
+        {
+            generation.multiplier = multiplier;
+        }
+    });
+}
+
+fn generation_options(
+    ui: &mut egui::Ui,
+    multiplier: &mut u32,
+    mode: &mut FrameGenerationMode,
+    fps: u32,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Multiplier");
+        for m in 2..=4 {
+            ui.add_enabled_ui(fps.is_multiple_of(m), |ui| {
+                ui.radio_value(multiplier, m, format!("{m}×"));
+            })
+            .response
+            .on_disabled_hover_text(format!("Needs a frame rate that divides by {m}."));
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Mode");
+        for (value, name) in [
+            (FrameGenerationMode::Performance, "Performance"),
+            (FrameGenerationMode::Balanced, "Balanced"),
+            (FrameGenerationMode::Quality, "Quality"),
+        ] {
+            ui.radio_value(mode, value, name);
+        }
+    });
+    let m = (*multiplier).max(1);
+    let note = if fps.is_multiple_of(m) {
+        format!(
+            "Your webcam runs at {} fps for {fps} fps. Adds about {} ms of delay.",
+            fps / m,
+            (m - 1) * 1000 / fps.max(1)
+        )
+    } else {
+        "Pick a frame rate that divides by 2, 3 or 4.".to_owned()
+    };
+    ui.label(RichText::new(note).small().color(theme::MUTED));
 }
 
 /// Returns true when the user asked to pick a background image.
@@ -335,11 +451,18 @@ fn preview(app: &mut App, ui: &mut egui::Ui) {
 
 /// The capture size and frame rate, as a menu under the preview.
 fn size_menu(app: &mut App, ui: &mut egui::Ui) {
+    let camera = &app.draft.camera;
     let sizes = app
         .webcams
         .iter()
-        .find(|w| w.path == app.draft.camera.input)
-        .map(|w| w.sizes.clone())
+        .find(|w| w.path == camera.input)
+        .map(|w| {
+            if camera.super_resolution.enabled {
+                w.upscaled_sizes(camera.input_format)
+            } else {
+                w.sizes.clone()
+            }
+        })
         .unwrap_or_default();
     let draft = &mut app.draft.camera;
     ui.add_enabled_ui(draft.enabled, |ui| {

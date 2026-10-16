@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
@@ -15,7 +15,7 @@ use ringbuf::traits::{Consumer, Producer, Split};
 
 use crate::config::{AudioEffect, Config, Stage};
 use crate::graph;
-use crate::nvidia::{self, Installation};
+use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::service::{Event, EventSender, LinkEnd};
 use crate::status::{self, State};
@@ -49,6 +49,8 @@ const FAST_TRIP: Duration = Duration::from_millis(2);
 const SLOW_TRIP: Duration = Duration::from_millis(3);
 /// Studio Voice takes up to about 12 ms on every other frame (RTX 5080).
 const STUDIO_VOICE_RESERVE: usize = 3 * PERIOD;
+/// A mic profile makes those frames take up to about 19 ms.
+const MIC_PROFILE_RESERVE: usize = 4 * PERIOD;
 const MAX_RESERVE: usize = 3 * RATE as usize / 50;
 /// Late output grows the reserve by at least this, so a slow GPU costs one gap, not several.
 const RESERVE_STEP: usize = RATE as usize / 100;
@@ -605,6 +607,8 @@ pub struct Settings {
     /// The real device: "default" or a node name.
     pub target: String,
     pub stages: Vec<Stage>,
+    /// The Studio Voice mic profile number.
+    pub profile: Option<u32>,
     pub unload_after: Duration,
     pub name: String,
     pub keep_awake: bool,
@@ -616,6 +620,7 @@ impl Settings {
         Self {
             target: mic.input.clone(),
             stages: mic.stages(),
+            profile: mic.profile(),
             unload_after: Duration::from_secs(mic.unload_after_minutes * 60),
             name: mic.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
@@ -627,6 +632,7 @@ impl Settings {
         Self {
             target: speaker.output.clone(),
             stages: speaker.stages(),
+            profile: None,
             unload_after: Duration::from_secs(speaker.unload_after_minutes * 60),
             name: speaker.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
@@ -958,25 +964,7 @@ impl AudioDevice {
         }
 
         let install = Installation::find(paths)?;
-        let mut args = vec![u8::from(self.settings.keep_awake).to_string()];
-        for stage in &self.settings.stages {
-            let (folder, file) = stage.effect.model();
-            args.extend([
-                stage.effect.selector().to_owned(),
-                nvidia::windows_path(&install.model(folder, file)?),
-                stage.strength.to_string(),
-            ]);
-        }
-        let reserve = if self
-            .settings
-            .stages
-            .iter()
-            .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency)
-        {
-            STUDIO_VOICE_RESERVE
-        } else {
-            RESERVE
-        };
+        let (args, reserve) = self.worker_args(&install)?;
         let (in_prod, in_cons) = HeapRb::<Frame>::new(QUEUE).split();
         let (out_prod, out_cons) = HeapRb::<Frame>::new(QUEUE).split();
         self.rt
@@ -1034,6 +1022,45 @@ impl AudioDevice {
             shared,
             ready: false,
         })
+    }
+
+    /// The worker's arguments and the output reserve its effects need.
+    fn worker_args(&self, install: &Installation) -> Result<(Vec<String>, usize)> {
+        let studio_voice = self
+            .settings
+            .stages
+            .iter()
+            .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency);
+        let profile = self.settings.profile.filter(|_| studio_voice);
+        let mut args = Vec::new();
+        if let Some(id) = profile {
+            if let Some(reason) = install.missing(Feature::MicProfiles) {
+                bail!(reason);
+            }
+            let (folder, file) = nvidia::MIC_PROFILES;
+            args.extend([
+                "--profile".into(),
+                nvidia::windows_path(&install.model(folder, file)?),
+                id.to_string(),
+            ]);
+        }
+        args.push(u8::from(self.settings.keep_awake).to_string());
+        for stage in &self.settings.stages {
+            let (folder, file) = stage.effect.model();
+            args.extend([
+                stage.effect.selector().to_owned(),
+                nvidia::windows_path(&install.model(folder, file)?),
+                stage.strength.to_string(),
+            ]);
+        }
+        let reserve = if profile.is_some() {
+            MIC_PROFILE_RESERVE
+        } else if studio_voice {
+            STUDIO_VOICE_RESERVE
+        } else {
+            RESERVE
+        };
+        Ok((args, reserve))
     }
 
     fn session_stream(&self, target: &str) -> Result<Stream> {

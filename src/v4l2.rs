@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::paths;
 
 pub(crate) const VIDIOC_S_FMT: libc::c_ulong = 0xC0D0_5605;
+pub(crate) const VIDIOC_S_PARM: libc::c_ulong = 0xC0CC_5616;
 const VIDIOC_SUBSCRIBE_EVENT: libc::c_ulong = 0x4020_565A;
 const VIDIOC_DQEVENT: libc::c_ulong = 0x8088_5659;
 const VIDIOC_REQBUFS: libc::c_ulong = 0xC014_5608;
@@ -64,6 +65,13 @@ impl Format {
             _rest: [0; 200 - size_of::<PixFormat>()],
         }
     }
+}
+
+/// `struct v4l2_streamparm`: `parm[2..4]` is timeperframe for capture and output alike.
+#[repr(C)]
+pub(crate) struct StreamParm {
+    pub type_: u32,
+    pub parm: [u32; 50],
 }
 
 #[repr(C)]
@@ -234,6 +242,21 @@ impl Loopback {
             return Err(io::Error::last_os_error());
         }
         self.shown = index;
+        Ok(())
+    }
+
+    /// The frame rate readers see; v4l2loopback reports 30 until told otherwise.
+    pub fn set_fps(&self, fps: u32) -> io::Result<()> {
+        let mut parm = StreamParm {
+            type_: BUF_TYPE_VIDEO_OUTPUT,
+            parm: [0; 50],
+        };
+        parm.parm[2] = 1;
+        parm.parm[3] = fps;
+        // SAFETY: `parm` matches struct v4l2_streamparm (204 bytes).
+        if unsafe { libc::ioctl(self.fd(), VIDIOC_S_PARM, &raw mut parm) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
 
@@ -558,6 +581,7 @@ mod tests {
     #[test]
     fn struct_sizes_match_the_kernel() {
         assert_eq!(size_of::<Format>(), 208);
+        assert_eq!(size_of::<StreamParm>(), 204);
         assert_eq!(size_of::<EventSubscription>(), 32);
         assert_eq!(size_of::<RequestBuffers>(), 20);
         assert_eq!(size_of::<Buffer>(), 88);

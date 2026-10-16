@@ -11,11 +11,57 @@ pub const VIDEO_DENOISE_MODELS: &str = "nvbcast_vfx_lld_v0_9";
 pub const EYE_CONTACT_MODELS: &str = "nvbcast_ar_gw_v0_9";
 pub const FACE_DETECTION_MODELS: &str = "nvbcast_ar_fd_v0_9";
 pub const STUDIO_LIGHT_MODELS: &str = "nvbcast_vfx_rl_v0_9";
+pub const MIC_PROFILES: (&str, &str) = (
+    "nvbcast_afx_stdvoice_v0_9",
+    "studio_voice_mic_profiles_48k.trtpkg",
+);
+
+/// Effects that NVIDIA leaves out of older builds and of some GPUs' packages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    SuperResolution,
+    FrameGeneration,
+    MicProfiles,
+}
+
+impl Feature {
+    pub const ALL: [Self; 3] = [
+        Self::SuperResolution,
+        Self::FrameGeneration,
+        Self::MicProfiles,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SuperResolution => "RTX Video Super Resolution",
+            Self::FrameGeneration => "RTX Video Frame Generation",
+            Self::MicProfiles => "Studio Voice mic profiles",
+        }
+    }
+
+    fn runtime_files(self) -> &'static [&'static str] {
+        match self {
+            Self::SuperResolution => &["nvVFXVideoSuperRes.dll", "nvngx_vsr.dll"],
+            Self::FrameGeneration => &["nvVFXVideoFrameGeneration.dll"],
+            Self::MicProfiles => &[],
+        }
+    }
+
+    /// NVIDIA's stated minimum, which matches the packages that ship the files.
+    fn gpus(self) -> &'static str {
+        match self {
+            Self::SuperResolution => "an RTX 30 series or newer GPU",
+            Self::FrameGeneration => "an RTX 40 series or newer GPU",
+            Self::MicProfiles => "NVIDIA Broadcast 2.3.0",
+        }
+    }
+}
 
 pub struct Installation {
     pub runtime: PathBuf,
     models: PathBuf,
     studio_light: PathBuf,
+    build: PathBuf,
 }
 
 impl Installation {
@@ -31,6 +77,35 @@ impl Installation {
             runtime,
             models,
             studio_light: build.join(crate::setup::STUDIO_LIGHT_DIR),
+            build,
+        })
+    }
+
+    /// Why `feature` can't run with these files, or `None` when it can.
+    pub fn missing(&self, feature: Feature) -> Option<String> {
+        let present = match feature {
+            Feature::MicProfiles => self.model(MIC_PROFILES.0, MIC_PROFILES.1).is_ok(),
+            _ => feature
+                .runtime_files()
+                .iter()
+                .all(|file| self.runtime.join(file).is_file()),
+        };
+        if present {
+            let no_ngx = feature == Feature::SuperResolution && crate::gpu::ngx_dir().is_none();
+            return no_ngx.then(|| crate::gpu::NO_NGX.into());
+        }
+        Some(if self.build.ends_with(crate::setup::BUILD) {
+            format!(
+                "{} needs {}; NVIDIA's files for this GPU don't include it",
+                feature.label(),
+                feature.gpus()
+            )
+        } else {
+            format!(
+                "{} needs NVIDIA Broadcast {}; run `broadcast-linux setup` to install it",
+                feature.label(),
+                crate::setup::BUILD
+            )
         })
     }
 

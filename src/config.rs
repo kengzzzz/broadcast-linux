@@ -76,6 +76,48 @@ pub struct Stage {
     pub strength: f32,
 }
 
+/// The Studio Voice mic profiles Broadcast offers. Default turns the profile model off.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicProfile {
+    #[default]
+    Default,
+    Bright,
+    Full,
+    Warm,
+}
+
+impl MicProfile {
+    pub const ALL: [Self; 4] = [Self::Default, Self::Bright, Self::Full, Self::Warm];
+
+    /// The model numbers its six profiles alphabetically: bright, colored, flat, full,
+    /// thin, warm. Broadcast shows three of them.
+    pub fn id(self) -> Option<u32> {
+        match self {
+            Self::Default => None,
+            Self::Bright => Some(0),
+            Self::Full => Some(3),
+            Self::Warm => Some(5),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StudioVoice {
+    pub enabled: bool,
+    pub profile: MicProfile,
+}
+
+impl Default for StudioVoice {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile: MicProfile::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MicConfig {
@@ -83,7 +125,7 @@ pub struct MicConfig {
     pub input: String,
     pub noise_removal: Adjustable,
     pub room_echo_removal: Adjustable,
-    pub studio_voice: Toggle,
+    pub studio_voice: StudioVoice,
     pub unload_after_minutes: u64,
     pub name: String,
 }
@@ -98,7 +140,10 @@ impl Default for MicConfig {
                 enabled: false,
                 ..Adjustable::default()
             },
-            studio_voice: Toggle { enabled: false },
+            studio_voice: StudioVoice {
+                enabled: false,
+                ..StudioVoice::default()
+            },
             unload_after_minutes: 2,
             name: "NVIDIA Broadcast Mic".into(),
         }
@@ -112,6 +157,14 @@ impl MicConfig {
             self.room_echo_removal,
             self.studio_voice.enabled,
         )
+    }
+
+    /// The Studio Voice profile in use, if any.
+    pub fn profile(&self) -> Option<u32> {
+        self.studio_voice
+            .enabled
+            .then(|| self.studio_voice.profile.id())
+            .flatten()
     }
 }
 
@@ -268,6 +321,80 @@ pub enum InputColor {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum SuperResolutionMode {
+    #[default]
+    Quality,
+    Performance,
+}
+
+impl SuperResolutionMode {
+    /// `VideoSuperRes` levels Ultra and Medium. Its streaming levels drew halos around hair
+    /// on webcam frames.
+    pub fn quality_level(self) -> u32 {
+        match self {
+            Self::Quality => 4,
+            Self::Performance => 2,
+        }
+    }
+}
+
+/// Captures the webcam smaller and upscales the result to `width`x`height`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuperResolution {
+    pub enabled: bool,
+    pub mode: SuperResolutionMode,
+}
+
+impl Default for SuperResolution {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: SuperResolutionMode::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameGenerationMode {
+    Performance,
+    #[default]
+    Balanced,
+    Quality,
+}
+
+impl FrameGenerationMode {
+    pub fn worker_value(self) -> u32 {
+        match self {
+            Self::Performance => 0,
+            Self::Balanced => 1,
+            Self::Quality => 2,
+        }
+    }
+}
+
+/// Runs the webcam at `fps / multiplier` and makes the frames in between.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FrameGeneration {
+    pub enabled: bool,
+    pub mode: FrameGenerationMode,
+    pub multiplier: u32,
+}
+
+impl Default for FrameGeneration {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: FrameGenerationMode::default(),
+            multiplier: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ParallelDecode {
     #[default]
     Auto,
@@ -295,6 +422,8 @@ pub struct CameraConfig {
     pub studio_light: StudioLight,
     pub eye_contact: Toggle,
     pub auto_frame: Toggle,
+    pub super_resolution: SuperResolution,
+    pub frame_generation: FrameGeneration,
 }
 
 impl CameraConfig {
@@ -306,9 +435,25 @@ impl CameraConfig {
             || self.studio_light.enabled
             || self.eye_contact.enabled
             || self.auto_frame.enabled
+            || self.super_resolution.enabled
+            || self.frame_generation.enabled
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Output frames made from each webcam frame.
+    pub fn frame_multiplier(&self) -> u32 {
+        if self.frame_generation.enabled {
+            self.frame_generation.multiplier.max(1)
+        } else {
+            1
+        }
+    }
+
+    /// Frames the webcam is asked for each second.
+    pub fn capture_fps(&self) -> u32 {
+        self.fps / self.frame_multiplier()
+    }
+
+    pub fn validate(&self) -> Result<()> {
         let backgrounds = usize::from(self.background.is_some())
             + usize::from(self.background_blur.enabled)
             + usize::from(self.background_removal.enabled);
@@ -319,6 +464,16 @@ impl CameraConfig {
         anyhow::ensure!(
             (0.0..=1.0).contains(&self.background_blur.strength),
             "camera.background_blur.strength must be between 0.0 and 1.0"
+        );
+        let generation = self.frame_generation;
+        anyhow::ensure!(
+            (2..=4).contains(&generation.multiplier),
+            "camera.frame_generation.multiplier must be 2, 3 or 4"
+        );
+        anyhow::ensure!(
+            !generation.enabled || self.fps.is_multiple_of(generation.multiplier),
+            "with frame generation, camera.fps must be a multiple of {}",
+            generation.multiplier
         );
         Ok(())
     }
@@ -349,6 +504,14 @@ impl Default for CameraConfig {
             },
             eye_contact: Toggle { enabled: false },
             auto_frame: Toggle { enabled: false },
+            super_resolution: SuperResolution {
+                enabled: false,
+                ..SuperResolution::default()
+            },
+            frame_generation: FrameGeneration {
+                enabled: false,
+                ..FrameGeneration::default()
+            },
         }
     }
 }

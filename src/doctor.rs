@@ -8,7 +8,7 @@ use crate::audio::Kind;
 use crate::camera::expand_home;
 use crate::config::{CameraConfig, Config};
 use crate::graph::Graph;
-use crate::nvidia::Installation;
+use crate::nvidia::{Feature, Installation};
 use crate::paths::{self, Paths};
 use crate::{gpu, prefix, setup, v4l2, webcam, worker};
 
@@ -174,7 +174,7 @@ pub fn check(paths: &Paths) -> Report {
         }
         Err(e) => {
             report("config", Err(e.into()));
-            for name in ["mic", "speaker", "virtual camera", "webcam"] {
+            for name in ["mic", "speaker", "virtual camera", "webcam", "rtx video"] {
                 report(name, skip("config did not load"));
             }
             return Report { version, items };
@@ -199,9 +199,11 @@ pub fn check(paths: &Paths) -> Report {
     if config.camera.enabled {
         report("virtual camera", loopback(&config.camera));
         report("webcam", webcam(&config.camera));
+        report("rtx video", rtx_video(paths, &config.camera));
     } else {
         report("virtual camera", skip("disabled in config"));
         report("webcam", skip("disabled in config"));
+        report("rtx video", skip("disabled in config"));
     }
     Report { version, items }
 }
@@ -363,19 +365,52 @@ fn webcam(camera: &CameraConfig) -> Check {
             "background image {background} does not exist"
         )));
     }
-    let format = webcam::choose(
-        &camera.input,
-        camera.input_format,
-        camera.width,
-        camera.height,
-    )?;
+    let (width, height) = if camera.super_resolution.enabled {
+        webcam::smaller_size(
+            &camera.input,
+            camera.input_format,
+            camera.width,
+            camera.height,
+        )?
+    } else {
+        (camera.width, camera.height)
+    };
+    let format = webcam::choose(&camera.input, camera.input_format, width, height)?;
     Ok(format!(
-        "{} {} {}x{}",
+        "{} {} {width}x{height}",
         camera.input,
-        format.label(),
-        camera.width,
-        camera.height
+        format.label()
     ))
+}
+
+fn rtx_video(paths: &Paths, camera: &CameraConfig) -> Check {
+    let install = Installation::find(paths)?;
+    let mut ready = Vec::new();
+    let mut notes = Vec::new();
+    for (feature, enabled) in [
+        (Feature::SuperResolution, camera.super_resolution.enabled),
+        (Feature::FrameGeneration, camera.frame_generation.enabled),
+    ] {
+        match install.missing(feature) {
+            None => ready.push(feature.label()),
+            Some(reason) if enabled => {
+                return Err(Problem::fail(format!(
+                    "{reason}, so the camera can't start until it is turned off"
+                )));
+            }
+            Some(reason) => notes.push(reason),
+        }
+    }
+    let mut detail = if ready.is_empty() {
+        "not available".to_owned()
+    } else {
+        format!("{} available", ready.join(" and "))
+    };
+    for note in notes {
+        detail.push('\n');
+        detail.push_str(&note);
+    }
+    Ok(detail)
 }
 
 #[cfg(test)]

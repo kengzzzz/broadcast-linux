@@ -109,16 +109,35 @@ static int keepawake_start(struct keepawake *k) {
 }
 
 int main(int argc, char **argv) {
+    const char *profile_model = NULL;
+    int profile_id = 0, offline = 0;
+    while (argc > 1 && !strncmp(argv[1], "--", 2)) {
+        if (!strcmp(argv[1], "--profile") && argc > 3) {
+            profile_model = argv[2];
+            profile_id = atoi(argv[3]);
+            argv += 3;
+            argc -= 3;
+        } else if (!strcmp(argv[1], "--offline")) {
+            offline = 1;
+            argv++;
+            argc--;
+        } else {
+            argc = 0;
+        }
+    }
     if (argc < 5 || (argc - 2) % 3) {
-        fprintf(stderr, "Usage: %s KEEP_AWAKE EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n",
-                argv[0]);
+        fprintf(stderr, "Usage: afx_stream.exe [--profile MODEL_PATH ID] [--offline] KEEP_AWAKE\n"
+                        "           EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n"
+                        "--profile sets the Studio Voice mic profile. --offline processes every frame of a file:\n"
+                        "nothing is dropped and the GPU is not kept awake.\n");
         return 2;
     }
-    int keep_awake = atoi(argv[1]);
+    int keep_awake = offline ? 0 : atoi(argv[1]);
     int count = (argc - 2) / 3;
     setvbuf(stdin, NULL, _IONBF, 0);
     /* a small output pipe pushes any backlog back to stdin, where drop_backlog discards it */
-    fcntl(fileno(stdout), F_SETPIPE_SZ, 8192);
+    if (!offline)
+        fcntl(fileno(stdout), F_SETPIPE_SZ, 8192);
 
     HMODULE afx = LoadLibraryA("NVAudioEffects.dll");
     if (!afx) {
@@ -156,8 +175,17 @@ int main(int argc, char **argv) {
         set_u32(st->effect, "sample_rate", 48000);
         if ((status = set_float(st->effect, "intensity_ratio", intensity)))
             fprintf(stderr, "%s: intensity not supported (%d); ignored\n", st->name, status);
+        int profiled = profile_model && !strcmp(st->name, "studio_voice_low_latency");
+        if (profiled && (status = set_string(st->effect, "mic_profile_model", profile_model))) {
+            fprintf(stderr, "%s: setting the mic profile model failed: %d\n", st->name, status);
+            return 4;
+        }
         if ((status = load(st->effect))) {
             fprintf(stderr, "Load(%s) failed: %d\n", st->name, status);
+            return 4;
+        }
+        if (profiled && (status = set_u32(st->effect, "mic_profile_id", (unsigned)profile_id))) {
+            fprintf(stderr, "%s: mic profile %d failed: %d\n", st->name, profile_id, status);
             return 4;
         }
         unsigned int in = 0, out = 0;
@@ -190,9 +218,11 @@ int main(int argc, char **argv) {
     QueryPerformanceFrequency(&freq);
     unsigned long frames = 0, failures = 0, dropped = 0;
 
-    dropped = drop_backlog(in_buf, frame);
-    fprintf(stderr, "Dropped %lu stale frames queued during startup\n", dropped);
-    dropped = 0;
+    if (!offline) {
+        dropped = drop_backlog(in_buf, frame);
+        fprintf(stderr, "Dropped %lu stale frames queued during startup\n", dropped);
+        dropped = 0;
+    }
 
     for (;;) {
         /* With no input until the model unloads, run on silence so the GPU stays awake.
@@ -208,7 +238,8 @@ int main(int argc, char **argv) {
         }
         if (!read_full(in_buf, frame))
             break;
-        dropped += drop_backlog(in_buf, frame);
+        if (!offline)
+            dropped += drop_backlog(in_buf, frame);
         const float *cur = in_buf;
         for (int i = 0; i < count; i++) {
             struct stage *st = &stages[i];

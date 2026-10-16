@@ -1,5 +1,6 @@
 use broadcast_linux::audio::Kind;
-use broadcast_linux::config::Adjustable;
+use broadcast_linux::config::{Adjustable, MicProfile};
+use broadcast_linux::nvidia::Feature;
 use eframe::egui::{self, RichText};
 
 use crate::app::{App, Endpoint, device_summary};
@@ -82,6 +83,7 @@ fn mic(app: &mut App, ui: &mut egui::Ui) {
         }
         None => "System default".to_owned(),
     };
+    let profiles_missing = app.missing(Feature::MicProfiles);
     let draft = &mut app.draft.mic;
     effect_row(
         ui,
@@ -111,13 +113,16 @@ fn mic(app: &mut App, ui: &mut egui::Ui) {
     });
     section_title(ui, "Microphone effects");
     ui.add_enabled_ui(draft.enabled, |ui| {
+        let voice = &mut draft.studio_voice;
         effect_row(
             ui,
             "mic-studio-voice",
             "Studio Voice",
             "Makes your voice sound like a studio mic. Replaces noise and echo removal.",
-            &mut draft.studio_voice.enabled,
-            None,
+            &mut voice.enabled,
+            Some(&mut |ui: &mut egui::Ui| {
+                profile_options(ui, &mut voice.profile, profiles_missing.as_deref());
+            }),
         );
         let studio = draft.studio_voice.enabled;
         let replaced = "Off while Studio Voice is on.";
@@ -146,6 +151,34 @@ fn mic(app: &mut App, ui: &mut egui::Ui) {
             );
         });
     });
+}
+
+/// `missing` says why only Default can be picked.
+fn profile_options(ui: &mut egui::Ui, current: &mut MicProfile, missing: Option<&str>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Mic profile");
+        egui::ComboBox::from_id_salt("mic-profile")
+            .selected_text(profile_name(*current))
+            .show_ui(ui, |ui| {
+                for profile in MicProfile::ALL {
+                    ui.add_enabled_ui(profile == MicProfile::Default || missing.is_none(), |ui| {
+                        ui.selectable_value(current, profile, profile_name(profile));
+                    });
+                }
+            });
+    });
+    if let Some(reason) = missing {
+        ui.label(RichText::new(reason).small().color(theme::MUTED));
+    }
+}
+
+fn profile_name(profile: MicProfile) -> &'static str {
+    match profile {
+        MicProfile::Default => "Default",
+        MicProfile::Bright => "Bright",
+        MicProfile::Full => "Full",
+        MicProfile::Warm => "Warm",
+    }
 }
 
 fn speaker(app: &mut App, ui: &mut egui::Ui) {
