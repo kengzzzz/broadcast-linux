@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -13,12 +15,20 @@ use crate::config::{self, Config};
 use crate::paths::Paths;
 use crate::status;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+pub struct LinkEnd {
+    pub node: u32,
+    pub app: String,
+}
+
+#[derive(Clone)]
 pub enum Event {
+    /// App names are looked up when the link appears, since its nodes may be gone by
+    /// the time the event is handled.
     LinkAdded {
         id: u32,
-        output_node: u32,
-        input_node: u32,
+        output: LinkEnd,
+        input: LinkEnd,
     },
     LinkRemoved(u32),
     IdleTimeout(Kind, u64),
@@ -61,33 +71,7 @@ pub fn run() -> Result<()> {
     let (events, receiver) = pw::channel::channel::<Event>();
 
     let registry = core.get_registry_rc()?;
-    let _registry_listener = registry
-        .add_listener_local()
-        .global({
-            let events = events.clone();
-            move |global| {
-                if global.type_ != pw::types::ObjectType::Link {
-                    return;
-                }
-                let node = |key| global.props?.get(key)?.parse().ok();
-                if let (Some(output_node), Some(input_node)) =
-                    (node("link.output.node"), node("link.input.node"))
-                {
-                    let _ = events.send(Event::LinkAdded {
-                        id: global.id,
-                        output_node,
-                        input_node,
-                    });
-                }
-            }
-        })
-        .global_remove({
-            let events = events.clone();
-            move |id| {
-                let _ = events.send(Event::LinkRemoved(id));
-            }
-        })
-        .register();
+    let _registry_listener = watch_links(&registry, &events);
 
     let signal = |signal, event: fn() -> Event| {
         let events = events.clone();
@@ -144,6 +128,59 @@ pub fn run() -> Result<()> {
     // callback runs, so joining there would deadlock with a camera status notification.
     drop(attached);
     Ok(())
+}
+
+/// Sends link events with the app at each end.
+fn watch_links(
+    registry: &pw::registry::RegistryRc,
+    events: &EventSender,
+) -> pw::registry::Listener {
+    let apps = Rc::new(RefCell::new(HashMap::<u32, String>::new()));
+    registry
+        .add_listener_local()
+        .global({
+            let (events, apps) = (events.clone(), apps.clone());
+            move |global| {
+                let prop = |key| global.props?.get(key);
+                match global.type_ {
+                    pw::types::ObjectType::Node => {
+                        if let Some(app) = prop("application.name").or_else(|| prop("node.name")) {
+                            apps.borrow_mut().insert(global.id, app.to_owned());
+                        }
+                    }
+                    pw::types::ObjectType::Link => {
+                        let node = |key| prop(key)?.parse().ok();
+                        let (Some(output), Some(input)) =
+                            (node("link.output.node"), node("link.input.node"))
+                        else {
+                            return;
+                        };
+                        let apps = apps.borrow();
+                        let end = |node| LinkEnd {
+                            node,
+                            app: apps
+                                .get(&node)
+                                .cloned()
+                                .unwrap_or_else(|| format!("node {node}")),
+                        };
+                        let _ = events.send(Event::LinkAdded {
+                            id: global.id,
+                            output: end(output),
+                            input: end(input),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .global_remove({
+            let events = events.clone();
+            move |id| {
+                apps.borrow_mut().remove(&id);
+                let _ = events.send(Event::LinkRemoved(id));
+            }
+        })
+        .register()
 }
 
 /// The mic is required; a speaker failure is returned instead.
@@ -246,16 +283,12 @@ fn device(audio: &mut [AudioDevice], kind: Kind) -> Option<&mut AudioDevice> {
 impl State {
     fn handle(&mut self, event: Event) {
         match event {
-            Event::LinkAdded {
-                id,
-                output_node,
-                input_node,
-            } => {
+            Event::LinkAdded { id, output, input } => {
                 // A link from the mic into the speaker is a reader of both.
                 let kinds: Vec<Kind> = self
                     .audio
                     .iter_mut()
-                    .filter_map(|d| d.link_added(id, output_node, input_node).then(|| d.kind()))
+                    .filter_map(|d| d.link_added(id, &output, &input).then(|| d.kind()))
                     .collect();
                 for kind in kinds {
                     self.readers_changed(kind);
@@ -330,7 +363,17 @@ impl State {
             return;
         };
         let token = d.bump_idle_token();
-        eprintln!("{}: {} app(s) reading", kind.label(), d.readers());
+        let apps = d.reader_apps();
+        if apps.is_empty() {
+            eprintln!("{}: 0 app(s) reading", kind.label());
+        } else {
+            eprintln!(
+                "{}: {} app(s) reading ({})",
+                kind.label(),
+                d.readers(),
+                apps.join(", ")
+            );
+        }
         if d.readers() > 0 {
             d.start(&self.paths);
         } else if d.has_session() {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -17,7 +17,7 @@ use crate::config::{AudioEffect, Config, Stage};
 use crate::graph;
 use crate::nvidia::{self, Installation};
 use crate::paths::Paths;
-use crate::service::{Event, EventSender};
+use crate::service::{Event, EventSender, LinkEnd};
 use crate::status::{self, State};
 use crate::worker::{Launch, Worker};
 
@@ -644,7 +644,8 @@ pub struct AudioDevice {
     rt: Arc<Rt>,
     /// Puts the node and the session stream on one clock, and keeps them unlinked.
     group: String,
-    readers: HashSet<u32>,
+    /// Link id to the app at its other end.
+    readers: HashMap<u32, String>,
     session: Option<Session>,
     next_session: u64,
     failures: u32,
@@ -720,7 +721,7 @@ impl AudioDevice {
             node,
             rt,
             group,
-            readers: HashSet::new(),
+            readers: HashMap::new(),
             session: None,
             next_session: 0,
             failures: 0,
@@ -754,6 +755,14 @@ impl AudioDevice {
         self.readers.len()
     }
 
+    /// Sorted, without duplicates.
+    pub fn reader_apps(&self) -> Vec<&str> {
+        let mut apps: Vec<&str> = self.readers.values().map(String::as_str).collect();
+        apps.sort_unstable();
+        apps.dedup();
+        apps
+    }
+
     pub fn status(&self) -> status::Device {
         let state = match &self.session {
             None => State::Idle,
@@ -773,12 +782,13 @@ impl AudioDevice {
         self.last_error = Some(message);
     }
 
-    pub fn link_added(&mut self, link: u32, output_node: u32, input_node: u32) -> bool {
-        let node = match self.kind {
-            Kind::Mic => output_node,
-            Kind::Speaker => input_node,
+    pub fn link_added(&mut self, link: u32, output: &LinkEnd, input: &LinkEnd) -> bool {
+        let (ours, reader) = match self.kind {
+            Kind::Mic => (output, input),
+            Kind::Speaker => (input, output),
         };
-        let added = node == self.node_id() && self.readers.insert(link);
+        let added =
+            ours.node == self.node_id() && self.readers.insert(link, reader.app.clone()).is_none();
         self.rt
             .linked
             .store(!self.readers.is_empty(), Ordering::Relaxed);
@@ -786,7 +796,7 @@ impl AudioDevice {
     }
 
     pub fn link_removed(&mut self, link: u32) -> bool {
-        let removed = self.readers.remove(&link);
+        let removed = self.readers.remove(&link).is_some();
         self.rt
             .linked
             .store(!self.readers.is_empty(), Ordering::Relaxed);

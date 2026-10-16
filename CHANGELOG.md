@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+The log names the apps that use the mic or speaker.
+
+- Mic and speaker: the log names the apps reading them, for example `mic: 1 app(s) reading (vesktop)`.
+
 ## 0.4.4 - 2026-10-12
 
 Lower camera delay on slower GPUs, and lower mic and speaker delay with fewer short gaps.

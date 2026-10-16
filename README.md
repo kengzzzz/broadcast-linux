@@ -22,9 +22,11 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 - Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
   or higher
 
-Only tested on an RTX 50 card. NVIDIA's installers for RTX 20 to 50 differ only in their
-AI model files and DLL signatures, so RTX 20, 30 and 40 cards should work too. Reports are
-welcome in [issue #1](https://github.com/kengzzzz/broadcast-linux/issues/1).
+Tested on an RTX 50 card. NVIDIA's installers for RTX 20 to 50 differ only in their
+AI model files and DLL signatures, so RTX 20, 30 and 40 cards should work too. Mic noise
+removal has also been [confirmed working on a GeForce GTX 1650 laptop](https://github.com/kengzzzz/broadcast-linux/issues/1#issuecomment-6204687420),
+below NVIDIA's requirements. Its camera effects weren't tried. Reports are welcome in
+[issue #1](https://github.com/kengzzzz/broadcast-linux/issues/1).
 
 ### Linux app
 
