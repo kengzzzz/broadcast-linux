@@ -2,8 +2,11 @@
 
 ## Unreleased
 
-The log names the apps that use the mic or speaker.
+NVIDIA Broadcast 2.3.0, with faster Eye Contact and a background blur of our own.
 
+- Setup: uses NVIDIA Broadcast 2.3.0. Run `broadcast-linux setup` after upgrading. It downloads about 2.4 GB, asks you to accept NVIDIA's licence again and then removes the 2.2.1 files. Until then the service keeps using 2.2.1.
+- Camera: background blur is now done by broadcast-linux, because Broadcast 2.3.0 no longer ships NVIDIA's blur. It is tuned to match NVIDIA's look, and also works with the 2.2.1 files.
+- Camera: Eye Contact is about twice as fast in our tests (RTX 5080, 1080p).
 - Mic and speaker: the log names the apps reading them, for example `mic: 1 app(s) reading (vesktop)`.
 
 ## 0.4.4 - 2026-10-12

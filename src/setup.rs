@@ -20,36 +20,36 @@ pub struct Installer {
     pub sha256: &'static str,
 }
 
-pub const BUILD: &str = "2.2.1.58338310";
+pub const BUILD: &str = "2.3.0.71988672";
 
 pub const INSTALLERS: &[Installer] = &[
     Installer {
         generation: Generation::Blackwell,
         build: BUILD,
-        url: "https://international.download.nvidia.com/Windows/broadcast/2.2.1/NVIDIA_Broadcast_Offline_Blackwell_v2.2.1.58338310.exe",
-        size: 2_225_036_120,
-        sha256: "caed3a89a0e3a680468801e818e6559b2b0358d6af217dd4996f37b2d5cb3878",
+        url: "https://international.download.nvidia.com/Windows/broadcast/2.3.0/NVIDIA_Broadcast_Offline_Blackwell_v2.3.0.71988672.exe",
+        size: 2_412_902_144,
+        sha256: "47f6915958a1f013e1faa994a6343350c3786440af4a8ca24ac7b7923604e8b2",
     },
     Installer {
         generation: Generation::Ada,
         build: BUILD,
-        url: "https://international.download.nvidia.com/Windows/broadcast/2.2.1/NVIDIA_Broadcast_Offline_Ada_v2.2.1.58338310.exe",
-        size: 2_356_726_072,
-        sha256: "fd9dec23257a792e35f81b0b2785c78e5f92243149bc26ef91a15ed692eb525b",
+        url: "https://international.download.nvidia.com/Windows/broadcast/2.3.0/NVIDIA_Broadcast_Offline_Ada_v2.3.0.71988672.exe",
+        size: 2_364_742_000,
+        sha256: "70c58169b0d287f7da5fabc197288daebcedb7c0131d309de6833a467074db40",
     },
     Installer {
         generation: Generation::Ampere,
         build: BUILD,
-        url: "https://international.download.nvidia.com/Windows/broadcast/2.2.1/NVIDIA_Broadcast_Offline_Ampere_v2.2.1.58338310.exe",
-        size: 2_199_322_600,
-        sha256: "7a272d0510841257bf27919b6c61c7aad49b3b6ffdf15d03b0392f3ee366095b",
+        url: "https://international.download.nvidia.com/Windows/broadcast/2.3.0/NVIDIA_Broadcast_Offline_Ampere_v2.3.0.71988672.exe",
+        size: 2_432_891_368,
+        sha256: "5895a83bdc0b06ccf1eae7104023b450f31526c143b8d52205c01d4a7e00e0a8",
     },
     Installer {
         generation: Generation::Turing,
         build: BUILD,
-        url: "https://international.download.nvidia.com/Windows/broadcast/2.2.1/NVIDIA_Broadcast_Offline_Turing_v2.2.1.58338310.exe",
-        size: 2_156_554_584,
-        sha256: "b08c29ec5fe4a1e429453c8227249d94ec152147c2603a7fc9d6d8b617e2ce4b",
+        url: "https://international.download.nvidia.com/Windows/broadcast/2.3.0/NVIDIA_Broadcast_Offline_Turing_v2.3.0.71988672.exe",
+        size: 2_165_724_632,
+        sha256: "13078d4c9f71566840801ad1feafcffc1e0bbfbc1072ed4bbba3523963fa8a70",
     },
 ];
 
@@ -61,7 +61,7 @@ pub trait Ui: Progress {
     fn accept_eula(&self, eula: &Path) -> Result<bool>;
 }
 
-/// Room for the extracted files (3.3 GB for Blackwell) and the Wine prefix (0.7 GB).
+/// Room for the extracted files (3.7 GB for Blackwell) and the Wine prefix (0.7 GB).
 const UNPACKED_SPACE: u64 = 5 << 30;
 
 pub fn run(paths: &Paths, opts: &Options, ui: &dyn Ui) -> Result<()> {

@@ -177,6 +177,170 @@ static int pin_host(void *pixels, size_t bytes, int pin) {
     return reg ? reg(pixels, bytes, 0) : -1;
 }
 
+/* Broadcast 2.3 dropped NVIDIA's BackgroundBlur effect, so the worker blurs the frame itself and
+ * the usual composite puts the person back on top. Person pixels get almost no weight, so their
+ * colors don't smear into the background around them. The Gaussian runs on a frame shrunk by
+ * `scale`, in premultiplied floats, and the weight is divided out when growing it back. */
+static const char blur_kernels[] =
+    "#define AT(img, pitch, x, y) (*(float4 *)((char *)(img) + (y) * (pitch) + (x) * 16))\n"
+    "extern \"C\" __global__ void shrink(const unsigned char *src, int src_pitch, const unsigned char *mask,\n"
+    "                                    int mask_pitch, int width, int height, float4 *dst, int dst_pitch,\n"
+    "                                    int dst_width, int dst_height, int scale) {\n"
+    "    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;\n"
+    "    if (x >= dst_width || y >= dst_height) return;\n"
+    "    float4 sum = make_float4(0, 0, 0, 0);\n"
+    "    for (int j = y * scale; j < min(y * scale + scale, height); j++)\n"
+    "        for (int i = x * scale; i < min(x * scale + scale, width); i++) {\n"
+    "            const unsigned char *p = src + j * src_pitch + i * 3;\n"
+    "            float w = (256 - mask[j * mask_pitch + i]) / 256.0f;\n"
+    "            sum.x += p[0] * w; sum.y += p[1] * w; sum.z += p[2] * w; sum.w += w;\n"
+    "        }\n"
+    "    AT(dst, dst_pitch, x, y) = sum;\n"
+    "}\n"
+    "extern \"C\" __global__ void gauss(const float4 *src, float4 *dst, int pitch, int width, int height,\n"
+    "                                   int dx, int dy, int radius, float sigma) {\n"
+    "    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;\n"
+    "    if (x >= width || y >= height) return;\n"
+    "    float4 sum = make_float4(0, 0, 0, 0);\n"
+    "    float k = -0.5f / (sigma * sigma);\n"
+    "    for (int t = -radius; t <= radius; t++) {\n"
+    "        float4 p = AT(src, pitch, min(max(x + t * dx, 0), width - 1), min(max(y + t * dy, 0), height - 1));\n"
+    "        float g = __expf(t * t * k);\n"
+    "        sum.x += p.x * g; sum.y += p.y * g; sum.z += p.z * g; sum.w += p.w * g;\n"
+    "    }\n"
+    "    AT(dst, pitch, x, y) = sum;\n"
+    "}\n"
+    "extern \"C\" __global__ void grow(const float4 *src, int src_pitch, int src_width, int src_height,\n"
+    "                                  int scale, unsigned char *dst, int dst_pitch, int width, int height) {\n"
+    "    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;\n"
+    "    if (x >= width || y >= height) return;\n"
+    "    float fx = (x + 0.5f) / scale - 0.5f, fy = (y + 0.5f) / scale - 0.5f;\n"
+    "    float x0 = floorf(fx), y0 = floorf(fy), ax = fx - x0, ay = fy - y0;\n"
+    "    int xs[2] = {min(max((int)x0, 0), src_width - 1), min(max((int)x0 + 1, 0), src_width - 1)};\n"
+    "    int ys[2] = {min(max((int)y0, 0), src_height - 1), min(max((int)y0 + 1, 0), src_height - 1)};\n"
+    "    float4 p = make_float4(0, 0, 0, 0);\n"
+    "    for (int j = 0; j < 2; j++)\n"
+    "        for (int i = 0; i < 2; i++) {\n"
+    "            float4 q = AT(src, src_pitch, xs[i], ys[j]);\n"
+    "            float w = (i ? ax : 1 - ax) * (j ? ay : 1 - ay);\n"
+    "            p.x += q.x * w; p.y += q.y * w; p.z += q.z * w; p.w += q.w * w;\n"
+    "        }\n"
+    "    unsigned char *o = dst + y * dst_pitch + x * 3;\n"
+    "    o[0] = (unsigned char)fminf(p.x / p.w + 0.5f, 255.0f);\n"
+    "    o[1] = (unsigned char)fminf(p.y / p.w + 0.5f, 255.0f);\n"
+    "    o[2] = (unsigned char)fminf(p.z / p.w + 0.5f, 255.0f);\n"
+    "}\n";
+
+typedef int (WINAPI *cu_get_ctx_fn)(void **);
+typedef int (WINAPI *cu_load_fn)(void **, const void *);
+typedef int (WINAPI *cu_function_fn)(void **, void *, const char *);
+typedef int (WINAPI *cu_launch_fn)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                                   CUstream, void **, void **);
+typedef int (WINAPI *cu_unload_fn)(void *);
+typedef int (WINAPI *nvrtc_create_fn)(void **, const char *, const char *, int, const char *const *,
+                                      const char *const *);
+typedef int (WINAPI *nvrtc_compile_fn)(void *, int, const char *const *);
+typedef int (WINAPI *nvrtc_size_fn)(void *, size_t *);
+typedef int (WINAPI *nvrtc_get_fn)(void *, char *);
+typedef int (WINAPI *nvrtc_destroy_fn)(void **);
+
+struct blur {
+    void *module, *shrink, *gauss, *grow;
+    cu_launch_fn launch;
+    cu_unload_fn unload;
+    NvCVImage shrunk, across;
+    int scale, radius;
+    float sigma;
+};
+
+/* Compiles the kernels into the current CUDA context, which must be the one the effects use. */
+static int blur_init(struct blur *b, float strength, unsigned width, unsigned height, image_alloc_fn image_alloc) {
+    HMODULE cuda = LoadLibraryA("nvcuda.dll"), nvrtc = LoadLibraryA("nvrtc64_120_0.dll");
+    if (!cuda || !nvrtc) {
+        fprintf(stderr, "Could not load %s: %u\n", cuda ? "nvrtc64_120_0.dll" : "nvcuda.dll", GetLastError());
+        return 1;
+    }
+    RESOLVE(cu_get_ctx_fn, get_ctx, cuda, "cuCtxGetCurrent");
+    RESOLVE(cu_load_fn, load, cuda, "cuModuleLoadData");
+    RESOLVE(cu_function_fn, function, cuda, "cuModuleGetFunction");
+    RESOLVE(nvrtc_create_fn, create, nvrtc, "nvrtcCreateProgram");
+    RESOLVE(nvrtc_compile_fn, compile, nvrtc, "nvrtcCompileProgram");
+    RESOLVE(nvrtc_size_fn, log_size, nvrtc, "nvrtcGetProgramLogSize");
+    RESOLVE(nvrtc_get_fn, get_log, nvrtc, "nvrtcGetProgramLog");
+    RESOLVE(nvrtc_size_fn, ptx_size, nvrtc, "nvrtcGetPTXSize");
+    RESOLVE(nvrtc_get_fn, get_ptx, nvrtc, "nvrtcGetPTX");
+    RESOLVE(nvrtc_destroy_fn, destroy, nvrtc, "nvrtcDestroyProgram");
+    b->launch = (cu_launch_fn)GetProcAddress(cuda, "cuLaunchKernel");
+    b->unload = (cu_unload_fn)GetProcAddress(cuda, "cuModuleUnload");
+    if (!get_ctx || !load || !function || !b->launch || !b->unload || !create || !compile || !log_size ||
+        !get_log || !ptx_size || !get_ptx || !destroy) {
+        fprintf(stderr, "A required CUDA or NVRTC export is missing\n");
+        return 1;
+    }
+    void *ctx = NULL;
+    if (get_ctx(&ctx) || !ctx) {
+        fprintf(stderr, "No current CUDA context for the blur\n");
+        return 1;
+    }
+
+    /* compute_75 is Turing, the oldest GPU Broadcast supports; the driver compiles it for newer ones. */
+    const char *options[] = {"--gpu-architecture=compute_75", "--use_fast_math"};
+    void *program = NULL;
+    char *ptx = NULL;
+    size_t bytes = 0;
+    int status = create(&program, blur_kernels, "blur.cu", 0, NULL, NULL);
+    if (!status && (status = compile(program, 2, options)) && !log_size(program, &bytes) && bytes > 1 &&
+        (ptx = malloc(bytes)) && !get_log(program, ptx))
+        fprintf(stderr, "%s\n", ptx);
+    free(ptx);
+    ptx = NULL;
+    if (!status && !(status = ptx_size(program, &bytes)))
+        status = (ptx = malloc(bytes)) ? get_ptx(program, ptx) : 1;
+    if (program) destroy(&program);
+    if (status) {
+        fprintf(stderr, "Compiling the blur failed: %d\n", status);
+        free(ptx);
+        return status;
+    }
+    status = load(&b->module, ptx);
+    free(ptx);
+    FreeLibrary(nvrtc);
+    if (status || (status = function(&b->shrink, b->module, "shrink")) ||
+        (status = function(&b->gauss, b->module, "gauss")) || (status = function(&b->grow, b->module, "grow")))
+        return status;
+
+    /* A Gaussian fitted to NVIDIA's effect at 1080p: sigma 12, 17 and 30 pixels at 0.25, 0.5 and 1. */
+    float sigma = height * (6 + 24 * strength) / 1080.0f;
+    b->scale = sigma < 6 ? 1 : (int)(sigma / 3);
+    b->sigma = sigma / b->scale;
+    b->radius = (int)ceilf(3 * b->sigma);
+    unsigned small_width = (width + b->scale - 1) / b->scale, small_height = (height + b->scale - 1) / b->scale;
+    if ((status = image_alloc(&b->shrunk, small_width, small_height, NVCV_RGBA, NVCV_F32, NVCV_CHUNKY, NVCV_GPU, 1)))
+        return status;
+    return image_alloc(&b->across, small_width, small_height, NVCV_RGBA, NVCV_F32, NVCV_CHUNKY, NVCV_GPU, 1);
+}
+
+/* Writes the frame blurred with the person weighted out to `dst`, an RGB frame like `src`. */
+static int blur_run(struct blur *b, NvCVImage *src, NvCVImage *mask, NvCVImage *dst, CUstream stream) {
+    int width = (int)src->width, height = (int)src->height, small_width = (int)b->shrunk.width,
+        small_height = (int)b->shrunk.height, one = 1, zero = 0;
+    void *shrink[] = {&src->pixels, &src->pitch, &mask->pixels, &mask->pitch, &width, &height,
+                      &b->shrunk.pixels, &b->shrunk.pitch, &small_width, &small_height, &b->scale};
+    void *across[] = {&b->shrunk.pixels, &b->across.pixels, &b->shrunk.pitch, &small_width, &small_height,
+                      &one, &zero, &b->radius, &b->sigma};
+    void *down[] = {&b->across.pixels, &b->shrunk.pixels, &b->shrunk.pitch, &small_width, &small_height,
+                    &zero, &one, &b->radius, &b->sigma};
+    void *grow[] = {&b->shrunk.pixels, &b->shrunk.pitch, &small_width, &small_height, &b->scale,
+                    &dst->pixels, &dst->pitch, &width, &height};
+    const unsigned small_x = (small_width + 15) / 16, small_y = (small_height + 15) / 16;
+    int status;
+    if ((status = b->launch(b->shrink, small_x, small_y, 1, 16, 16, 1, 0, stream, shrink, NULL)) ||
+        (status = b->launch(b->gauss, small_x, small_y, 1, 16, 16, 1, 0, stream, across, NULL)) ||
+        (status = b->launch(b->gauss, small_x, small_y, 1, 16, 16, 1, 0, stream, down, NULL)))
+        return status;
+    return b->launch(b->grow, (width + 15) / 16, (height + 15) / 16, 1, 16, 16, 1, 0, stream, grow, NULL);
+}
+
 struct framing {
     float cx, cy, height;
     float target_cx, target_cy, target_height;
@@ -353,7 +517,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     const int slots = out_device ? out_count : 2;
-    /* NVIDIA's filter still blurs at strength zero; make zero a true passthrough. */
+    /* The blur's smallest radius is still visible; make zero a true passthrough. */
     if (blur_strength == 0) blur_enabled = 0;
 
     use_blocking_sync();
@@ -436,7 +600,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL, blur = NULL;
+    NvVFX_Handle gs = NULL, relight = NULL, denoise = NULL;
+    struct blur blur = {0};
     NvAR_Handle gaze = NULL, faces = NULL;
     NvAR_Rect face_rects[MAX_FACES] = {{0}};
     NvAR_BBoxes face_boxes = {face_rects, 0, MAX_FACES};
@@ -450,7 +615,7 @@ int main(int argc, char **argv) {
     NvCVImage src_slots[MAX_SLOTS] = {{0}}, out_slots[MAX_SLOTS] = {{0}};
     NvCVImage src_gpu = {0}, src_rgb = {0}, mask = {0}, relit = {0}, projected = {0},
               hdr = {0}, light_mask = {0}, scaled_mask = {0}, bg_cpu = {0}, bg_gpu = {0}, out_gpu = {0},
-              dn_in = {0}, dn_out = {0}, blur_in = {0}, blur_out = {0}, gaze_out = {0}, framed = {0}, tmp = {0};
+              dn_in = {0}, dn_out = {0}, blurred = {0}, gaze_out = {0}, framed = {0}, tmp = {0};
     float *hdr_pixels = NULL;
     uint8_t *shm = MAP_FAILED, *out_maps[MAX_SLOTS];
     const size_t shm_bytes = slots * (in_bytes + (out_device ? 0 : out_bytes));
@@ -576,15 +741,8 @@ int main(int argc, char **argv) {
     }
 
     if (blur_enabled) {
-        CHECK("Alloc blur input", image_alloc(&blur_in, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
-        CHECK("Alloc blur output", image_alloc(&blur_out, width, height, NVCV_BGR, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
-        CHECK("CreateEffect(BackgroundBlur)", create("BackgroundBlur", &blur));
-        CHECK("Set Stream", set_stream(blur, "CudaStream", stream));
-        CHECK("Set SrcImage0", set_image(blur, "SrcImage0", &blur_in));
-        CHECK("Set SrcImage1", set_image(blur, "SrcImage1", &mask));
-        CHECK("Set DstImage0", set_image(blur, "DstImage0", &blur_out));
-        CHECK("Set Strength", set_f32(blur, "Strength", blur_strength));
-        CHECK("Load(BackgroundBlur)", load(blur));
+        CHECK("Alloc blurred", image_alloc(&blurred, width, height, NVCV_RGB, NVCV_U8, NVCV_CHUNKY, NVCV_GPU, 1));
+        CHECK("Background blur setup", blur_init(&blur, blur_strength, width, height, image_alloc));
     }
 
     if (relight_dir) {
@@ -637,11 +795,11 @@ int main(int argc, char **argv) {
         CHECK("Upload background", image_transfer(&bg_cpu, &bg_gpu, 1.0f, stream, &tmp));
     }
     const NvCVImage *fg = relight ? &relit : &src_rgb;
-    const NvCVImage *bg = background_path || remove_background ? &bg_gpu : &src_rgb;
+    const NvCVImage *bg = background_path || remove_background ? &bg_gpu : blur.module ? &blurred : &src_rgb;
     fprintf(stderr, "Camera effects ready (%s%s%s%s%s%s%s); reading %ux%u %s frames, writing YUYV\n",
             denoise ? "noise removal " : "", gaze ? "Eye Contact " : "", faces ? "Auto Frame " : "",
             background_path ? "background " : "",
-            blur ? "background blur " : "", remove_background ? "background removal " : "",
+            blur.module ? "background blur " : "", remove_background ? "background removal " : "",
             relight ? "Studio Light" : "", width, height, input->name);
 
     unsigned long frames = 0;
@@ -707,14 +865,10 @@ int main(int argc, char **argv) {
             CHECK("Convert mask", image_transfer(&scaled_mask, &light_mask, 1.0f, stream, &tmp));
             CHECK("Blend light", composite(&relit, &src_rgb, &light_mask, &relit, stream));
         }
+        if (blur.module)
+            CHECK("Blur background", blur_run(&blur, &src_rgb, &mask, &blurred, stream));
         CHECK("Composite", composite(fg, bg, &mask, &out_gpu, stream));
-        if (blur) {
-            CHECK("Convert blur input", image_transfer(&out_gpu, &blur_in, 1.0f, stream, &tmp));
-            CHECK("Run(BackgroundBlur)", run(blur, 0));
-            CHECK("Transfer output", image_transfer(&blur_out, out_cpu, 1.0f, stream, &tmp));
-        } else {
-            CHECK("Transfer output", image_transfer(&out_gpu, out_cpu, 1.0f, stream, &tmp));
-        }
+        CHECK("Transfer output", image_transfer(&out_gpu, out_cpu, 1.0f, stream, &tmp));
     write:
         CHECK("Synchronize", stream_sync(stream));
         if ((shm != MAP_FAILED ? putchar(k) == EOF : fwrite(out_cpu->pixels, 1, out_bytes, stdout) != out_bytes) ||
@@ -735,8 +889,8 @@ int main(int argc, char **argv) {
 cleanup:
     {
         NvCVImage *images[] = {&src_gpu, &src_rgb, &mask, &relit, &projected, &hdr, &light_mask, &scaled_mask,
-                               &bg_cpu, &bg_gpu, &out_gpu, &dn_in, &dn_out, &blur_in, &blur_out, &gaze_out,
-                               &framed, &tmp};
+                               &bg_cpu, &bg_gpu, &out_gpu, &dn_in, &dn_out, &blurred, &blur.shrunk, &blur.across,
+                               &gaze_out, &framed, &tmp};
         for (size_t i = 0; i < sizeof images / sizeof *images; i++)
             if (images[i]->pixels) image_free(images[i]);
         for (int k = 0; k < slots; k++) {
@@ -757,7 +911,7 @@ cleanup:
     if (relight) destroy(relight);
     if (denoise_state) free_state(denoise, denoise_state);
     if (denoise) destroy(denoise);
-    if (blur) destroy(blur);
+    if (blur.module) blur.unload(blur.module);
     if (gaze) ar_destroy(gaze);
     if (faces) ar_destroy(faces);
     if (stream) stream_destroy(stream);
