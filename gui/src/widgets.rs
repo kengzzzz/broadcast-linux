@@ -26,7 +26,14 @@ pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         let visuals = ui.style().interact_selectable(&response, *on);
         let rect = rect.expand(visuals.expansion);
         let radius = 0.5 * rect.height();
-        let fill = if *on { theme::ACCENT } else { visuals.bg_fill };
+        let fill = if *on {
+            theme::ACCENT
+        } else if ui.visuals().dark_mode {
+            visuals.bg_fill
+        } else {
+            // The light theme's widget fill barely shows on a white background.
+            Color32::from_gray(190)
+        };
         ui.painter()
             .rect(rect, radius, fill, visuals.bg_stroke, StrokeKind::Inside);
         let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
@@ -57,6 +64,14 @@ pub fn effect_row(
             if options.is_some() {
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(chevron - 6.0, 22.0), Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::CollapsingHeader,
+                        ui.is_enabled(),
+                        open,
+                        title,
+                    )
+                });
                 let color = ui.style().interact(&response).fg_stroke.color;
                 paint_chevron(ui, rect, open, color);
                 if response.clicked() {
