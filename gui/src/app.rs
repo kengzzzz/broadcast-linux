@@ -23,10 +23,16 @@ use crate::{pages, theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Audio,
+    Video,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Endpoint {
     Mic,
     Speaker,
     Camera,
-    Setup,
 }
 
 pub struct Message {
@@ -57,7 +63,7 @@ pub struct App {
     pub sinks: Vec<AudioNode>,
     pub default_source: Option<String>,
     pub webcams: Vec<Webcam>,
-    /// The virtual camera's label, or what to fix; `None` until the Camera page checks it.
+    /// The virtual camera's label, or what to fix; `None` until the Video page checks it.
     pub loopback: Option<Result<String, v4l2::Hint>>,
     task: Option<(String, Receiver<Result<String, String>>)>,
     pub message: Option<Message>,
@@ -131,7 +137,7 @@ impl App {
             }
         });
         let mut app = Self {
-            page: Page::Mic,
+            page: Page::Audio,
             link: Link::start(ctx.clone()),
             config_seen: modified(&paths),
             paths,
@@ -218,13 +224,12 @@ impl App {
         }
     }
 
-    pub fn device(&self, kind: Page) -> Option<Device> {
+    pub fn device(&self, endpoint: Endpoint) -> Option<Device> {
         let status = self.status()?;
-        Some(match kind {
-            Page::Mic => status.mic,
-            Page::Speaker => status.speaker,
-            Page::Camera => status.camera,
-            Page::Setup => return None,
+        Some(match endpoint {
+            Endpoint::Mic => status.mic,
+            Endpoint::Speaker => status.speaker,
+            Endpoint::Camera => status.camera,
         })
     }
 
@@ -232,14 +237,14 @@ impl App {
         if page == self.page {
             return;
         }
-        if page != Page::Camera {
+        if page != Page::Video {
             self.preview = None;
         }
         self.page = page;
         match page {
-            Page::Mic | Page::Speaker => self.refresh_devices(),
-            Page::Camera => self.refresh_camera(),
-            Page::Setup => self.run_checks(ctx),
+            Page::Audio => self.refresh_devices(),
+            Page::Video => self.refresh_camera(),
+            Page::Settings => self.run_checks(ctx),
         }
     }
 
@@ -451,7 +456,7 @@ impl App {
         {
             self.checks_task = None;
             if self.checks.is_none() && checks.setup_needed.is_some() {
-                self.page = Page::Setup;
+                self.page = Page::Settings;
             }
             self.checks = Some(checks);
         }

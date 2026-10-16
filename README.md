@@ -96,15 +96,15 @@ sudo usermod -aG video "$USER"
 ## Get started
 
 1. Open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`.
-2. On **Setup**, click **Download and install** and accept NVIDIA's licence.
+2. On **Settings**, click **Download and install** and accept NVIDIA's licence.
    The download is about 2.2 to 2.4 GB depending on your GPU. Start the service on the same page.
 3. Choose your devices and effects, then **Apply**. For the camera, follow the
-   **Camera** page's module and permission steps. Log in again after joining the video group.
+   **Video** page's module and permission steps. Log in again after joining the video group.
 4. In your call or recording app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.
    Enable the speaker if needed and select **NVIDIA Broadcast Speaker** as the app's output.
 
 Mic noise removal is on by default. Speaker processing and camera effects are off.
-The **Setup** page includes diagnostics and service logs.
+The **Settings** page includes diagnostics and service logs.
 
 ## Documentation
 

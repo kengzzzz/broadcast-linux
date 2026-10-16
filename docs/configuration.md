@@ -43,7 +43,7 @@ systemctl --user restart broadcast-linux
 
 ## Microphone
 
-Select your real microphone on the **Microphone** page and click **Apply**. To make
+Select your real microphone on the **Audio** page and click **Apply**. To make
 the virtual mic the system default, use **Make it the system default** afterwards.
 
 From the terminal, list your microphones, set `[mic] input` to the real mic's node
@@ -62,7 +62,7 @@ removal uses the higher of their strengths.
 
 ## Speaker
 
-Enable processing on the **Speaker** page and choose your real output. In the
+Turn on **Virtual speaker** on the **Audio** page and choose your real output. In the
 config, set `[speaker] enabled = true` and `output` to `"default"` or a real sink's
 node name from `broadcast-linux devices`, then restart the service.
 
@@ -71,8 +71,8 @@ and tuned for speech. Keep music and games on your real output.
 
 ## Camera
 
-Choose the real webcam and capture size on the **Camera** page, then apply changes
-before starting its preview. The default input is `/dev/video0`. The virtual
+Choose the real webcam on the **Video** page, and the capture size in the menu under
+the preview. Apply changes before turning on the preview. The default input is `/dev/video0`. The virtual
 output is `/dev/video10`, labelled **Broadcast Camera**.
 
 Use one background effect at a time: replacement image, blur or removal. Removal
