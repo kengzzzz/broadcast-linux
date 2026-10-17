@@ -115,7 +115,7 @@ fn nvidia_files(app: &mut App, ui: &mut egui::Ui) {
                         ui.label(
                             "Downloads NVIDIA Broadcast for your GPU (about 2.2 to 2.4 GB) from NVIDIA, \
                              asks you to accept NVIDIA's licence, and extracts the effects \
-                             (about 5 GB of free space needed).",
+                             (about 8 GB of free space needed).",
                         );
                         let gpu_ok = checks.gpu.is_ok();
                         if ui

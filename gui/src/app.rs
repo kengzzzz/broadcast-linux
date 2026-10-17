@@ -414,10 +414,7 @@ impl App {
         thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Choose a background image")
-                .add_filter(
-                    "Images",
-                    &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"],
-                )
+                .add_filter("Images", &any_case(&IMAGE_EXTENSIONS))
                 .pick_file()
                 .map(|p| p.display().to_string());
             let _ = tx.send(picked);
@@ -557,4 +554,14 @@ pub fn device_summary(device: &Device) -> (egui::Color32, String) {
         Some(error) => (theme::BAD, format!("{text}: {error}")),
         None => (color, text),
     }
+}
+
+pub const IMAGE_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
+
+/// Portal file filters are case-sensitive, and cameras name files like `IMG_1234.JPG`.
+pub fn any_case(extensions: &[&str]) -> Vec<String> {
+    extensions
+        .iter()
+        .flat_map(|ext| [ext.to_ascii_lowercase(), ext.to_ascii_uppercase()])
+        .collect()
 }

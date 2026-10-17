@@ -1,8 +1,8 @@
 //! The File Processor: ffmpeg decodes and encodes, and the live workers run the effects.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,17 +16,18 @@ use serde_json::Value;
 use crate::audio::{self, FRAME, RATE};
 use crate::camera::{self, expand_home};
 use crate::config::{CameraConfig, MicConfig};
+use crate::frames;
 use crate::nvidia::Installation;
 use crate::paths::Paths;
 use crate::progress::Progress;
-use crate::worker::{Launch, Pipes, Worker};
+use crate::worker::{self, Launch, Pipes, Worker};
 
 pub const UPSCALE_HEIGHTS: [u32; 3] = [1080, 1440, 2160];
 
 /// For file pickers. Anything ffmpeg reads works.
-pub const EXTENSIONS: [&str; 14] = [
-    "mp4", "mov", "mkv", "webm", "m4v", "avi", "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus",
-    "wma",
+pub const EXTENSIONS: [&str; 23] = [
+    "mp4", "mov", "mkv", "webm", "m4v", "avi", "mts", "m2ts", "wmv", "flv", "mpg", "mpeg", "3gp",
+    "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "aif", "aiff",
 ];
 
 const POLL: Duration = Duration::from_millis(100);
@@ -132,9 +133,10 @@ pub fn process(
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let stem = input
-        .file_stem()
-        .map_or_else(|| "output".into(), |s| s.to_string_lossy().into_owned());
+    let stem = input.file_stem().map_or_else(
+        || "output".into(),
+        |s| shortened(&s.to_string_lossy()).to_owned(),
+    );
     let job = Job {
         paths,
         install: Installation::find(paths)?,
@@ -171,6 +173,15 @@ pub fn process(
 
     progress.check()?;
     publish(&output, dir, &stem, container.ext())
+}
+
+/// Leaves room in a 255-byte file name for what `Temp` and `publish` add.
+fn shortened(stem: &str) -> &str {
+    let mut end = stem.len().min(200);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    &stem[..end]
 }
 
 /// Moves `output` to the first free `STEM-broadcast[-N].EXT`, also when other jobs race for it.
@@ -329,6 +340,7 @@ impl Job<'_> {
         split.context("feeding the audio worker")?;
         let emitted = joined.context("reading the audio worker")?;
         let expected = length.get().copied().unwrap_or_default();
+        ensure!(expected > 0, "ffmpeg couldn't decode any of its audio");
         ensure!(
             emitted == expected,
             "the audio worker returned {emitted} of {expected} samples"
@@ -346,7 +358,7 @@ impl Job<'_> {
             (video.width, video.height)
         };
         let mut decoder = self.video_decoder(video)?;
-        let (worker, pipes) = self.camera_worker(video, out, decoder.stdout()?)?;
+        let (worker, pipes, _background) = self.camera_worker(video, out, decoder.stdout()?)?;
         let frames = Arc::new(AtomicU64::new(0));
         let log = Log::watch(pipes.stderr, {
             let frames = Arc::clone(&frames);
@@ -374,6 +386,12 @@ impl Job<'_> {
         let statuses = wait_tools(&mut tools, &mut workers)?;
         let worker_failed = !statuses.workers[0].success();
         let failure = || log.worker_failure("camera");
+        if worker_failed && log.last().starts_with("No input frames") {
+            if !statuses.tools[0].success() {
+                bail!(tools[0].failure());
+            }
+            bail!("ffmpeg couldn't decode any of its video");
+        }
         // When the encoder stops reading, the worker fails too, but the encoder's error is
         // the useful one.
         if worker_failed && !log.last().starts_with("Output pipe closed") {
@@ -419,29 +437,38 @@ impl Job<'_> {
         )
     }
 
+    /// Also returns the background image, which must stay open until the worker has read it.
     fn camera_worker(
         &self,
         video: &VideoStream,
         out: (u32, u32),
         frames: ChildStdout,
-    ) -> Result<(Worker, Pipes)> {
+    ) -> Result<(Worker, Pipes, Option<File>)> {
         let config = &self.effects.video;
         let (width, height) = (video.width, video.height);
+        // Wine hands arguments to workers in the Windows code page, so a path beside a file in
+        // ~/Vidéos wouldn't reach them. A /proc path is plain ASCII.
         let background = match &config.background {
             Some(image) => {
-                let file = self.temp.file("background.bgr");
                 let bgr = camera::background_bgr(&expand_home(image), width, height)?;
-                fs::write(&file, bgr)?;
+                let mut file = File::from(
+                    frames::memfd(c"broadcast-linux-background")
+                        .context("storing the background")?,
+                );
+                file.write_all(&bgr).context("storing the background")?;
                 Some(file)
             }
             None => None,
         };
+        let background_path = background
+            .as_ref()
+            .map(|file| PathBuf::from(frames::proc_path(file)));
         let mut args = camera::effect_args(
             config,
             &self.install,
             (width, height),
             out,
-            background.as_deref(),
+            background_path.as_deref(),
         )?;
         let (num, den) = video.rate;
         args.extend([
@@ -452,13 +479,14 @@ impl Job<'_> {
             "--frame-ms".into(),
             (1000.0 * f64::from(den) / f64::from(num)).to_string(),
         ]);
-        Worker::spawn(Launch {
+        let (worker, pipes) = Worker::spawn(Launch {
             program: "camera_stream",
             prefix: self.paths.prefix(),
             cwd: self.install.runtime.clone(),
             args,
             stdin: Some(Stdio::from(frames)),
-        })
+        })?;
+        Ok((worker, pipes, background))
     }
 
     /// Adds the processed `audio`, else the file's own.
@@ -740,7 +768,7 @@ impl Log {
         let thread = thread::spawn({
             let last = Arc::clone(&last);
             move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                for line in worker::log_lines(stderr) {
                     each(&line);
                     let mut last = last.lock().unwrap();
                     // A usage text says more by its first line than its last.
@@ -1331,6 +1359,14 @@ mod tests {
         assert_eq!(taken.kind(), ErrorKind::AlreadyExists, "another job's file");
         assert_eq!(fs::read_to_string(&first).unwrap(), "one");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shortens_long_names() {
+        let thai = "วิดีโอ".repeat(20);
+        let short = shortened(&thai);
+        assert!((198..=200).contains(&short.len()) && thai.starts_with(short));
+        assert_eq!(shortened("clip"), "clip");
     }
 
     #[test]

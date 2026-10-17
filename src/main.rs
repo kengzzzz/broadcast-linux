@@ -93,7 +93,12 @@ struct ProcessArgs {
         require_equals = true, default_missing_value = "1", value_parser = strength)]
     studio_light: Option<f32>,
     /// Studio Light's color [default: neutral]
-    #[arg(long, help_heading = "Video effects", value_name = "PRESET")]
+    #[arg(
+        long,
+        help_heading = "Video effects",
+        value_name = "PRESET",
+        requires = "studio_light"
+    )]
     light: Option<LightPreset>,
     /// Point the eyes at the camera
     #[arg(long, help_heading = "Video effects")]
@@ -106,7 +111,12 @@ struct ProcessArgs {
         value_parser = ["1080", "1440", "2160"])]
     super_resolution: Option<String>,
     /// Super Resolution's mode [default: quality]
-    #[arg(long, help_heading = "Video effects", value_name = "MODE")]
+    #[arg(
+        long,
+        help_heading = "Video effects",
+        value_name = "MODE",
+        requires = "super_resolution"
+    )]
     super_resolution_mode: Option<SuperResolutionMode>,
     /// Make 2, 3 or 4 frames from each one with RTX Video Frame Generation
     #[arg(long, help_heading = "Video effects", value_name = "MULTIPLIER", num_args = 0..=1,
@@ -114,7 +124,12 @@ struct ProcessArgs {
         value_parser = clap::value_parser!(u32).range(2..=4))]
     frame_generation: Option<u32>,
     /// Frame Generation's mode [default: balanced]
-    #[arg(long, help_heading = "Video effects", value_name = "MODE")]
+    #[arg(
+        long,
+        help_heading = "Video effects",
+        value_name = "MODE",
+        requires = "frame_generation"
+    )]
     frame_generation_mode: Option<FrameGenerationMode>,
 }
 

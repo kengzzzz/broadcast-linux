@@ -16,7 +16,7 @@ use broadcast_linux::process::{self, Effects, UPSCALE_HEIGHTS};
 use broadcast_linux::progress::{Cancelled, Progress};
 use eframe::egui::{self, RichText};
 
-use crate::app::App;
+use crate::app::{App, IMAGE_EXTENSIONS, any_case};
 use crate::audio::{adjustable, profile_options};
 use crate::pages::{strength, warning};
 use crate::theme;
@@ -214,7 +214,7 @@ impl Files {
             let picked = match pick {
                 Pick::Files => dialog
                     .set_title("Add video or audio files")
-                    .add_filter("Video and audio", &process::EXTENSIONS)
+                    .add_filter("Video and audio", &any_case(&process::EXTENSIONS))
                     .pick_files()
                     .unwrap_or_default(),
                 Pick::Folder => dialog
@@ -229,10 +229,7 @@ impl Files {
                     .collect(),
                 Pick::Background => dialog
                     .set_title("Choose a background image")
-                    .add_filter(
-                        "Images",
-                        &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"],
-                    )
+                    .add_filter("Images", &any_case(&IMAGE_EXTENSIONS))
                     .pick_file()
                     .into_iter()
                     .collect(),
@@ -258,7 +255,10 @@ impl Files {
                 }
                 Pick::Background => {
                     if let Some(image) = picked.into_iter().next() {
-                        self.effects.video.background = Some(image.display().to_string());
+                        let video = &mut self.effects.video;
+                        video.background = Some(image.display().to_string());
+                        video.background_blur.enabled = false;
+                        video.background_removal.enabled = false;
                     }
                 }
             }
@@ -367,7 +367,10 @@ fn inputs(app: &mut App, ui: &mut egui::Ui) {
             if ui.radio(beside, "Beside each file").clicked() {
                 files.output_dir = None;
             }
-            if ui.add_enabled(!picking, egui::RadioButton::new(!beside, "In a folder…")).clicked() {
+            if ui
+                .add_enabled(!picking, egui::RadioButton::new(!beside, "In a folder…"))
+                .clicked()
+            {
                 files.pick(Pick::Output, &ctx);
             }
         });
@@ -376,7 +379,8 @@ fn inputs(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.label(
             RichText::new(
-                "New files get “-broadcast” added to their name. Videos with video effects become MP4.",
+                "New files get “-broadcast” added to their name. Videos with video effects become \
+                 MP4. Only the first audio track is kept.",
             )
             .small()
             .color(theme::MUTED),
@@ -433,7 +437,7 @@ fn file_list(files: &mut Files, ui: &mut egui::Ui, running: bool) {
                         if let Some(dir) = output.parent()
                             && ui.small_button("Show folder").clicked()
                         {
-                            let _ = Command::new("xdg-open").arg(dir).spawn();
+                            show_folder(dir.to_path_buf());
                         }
                     });
                 }
@@ -480,6 +484,8 @@ fn process_bar(app: &mut App, ui: &mut egui::Ui) {
         .count();
     let problem = if files.ffmpeg_missing.is_some() {
         Some("Install ffmpeg first.".to_owned())
+    } else if files.picker.is_some() {
+        Some("Finish choosing in the open window first.".to_owned())
     } else if waiting == 0 {
         Some("Add files to process.".to_owned())
     } else if !files.effects.audio_on() && !files.effects.video_on() {
@@ -513,6 +519,15 @@ fn process_bar(app: &mut App, ui: &mut egui::Ui) {
     if start {
         app.files.start(&app.paths, &ctx);
     }
+}
+
+/// Waits for xdg-open on its own thread, so it leaves no zombie.
+fn show_folder(dir: PathBuf) {
+    thread::spawn(move || {
+        if let Ok(mut child) = Command::new("xdg-open").arg(dir).spawn() {
+            let _ = child.wait();
+        }
+    });
 }
 
 fn background_problem(effects: &Effects) -> Option<&'static str> {

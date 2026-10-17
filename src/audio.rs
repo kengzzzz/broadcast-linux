@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::service::{Event, EventSender, LinkEnd};
 use crate::status::{self, State};
-use crate::worker::{Launch, Worker};
+use crate::worker::{self, Launch, Worker};
 
 pub(crate) const RATE: u32 = 48_000;
 /// Broadcast's audio models all run on fixed 40 ms frames at 48 kHz.
@@ -1298,7 +1298,7 @@ fn watch_stderr(
     session: u64,
 ) {
     let mut failed = false;
-    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+    for line in worker::log_lines(stderr) {
         eprintln!("{} worker: {line}", kind.label());
         if !failed {
             line.clone_into(&mut shared.last_line.lock().unwrap());

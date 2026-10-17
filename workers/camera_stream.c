@@ -1006,7 +1006,10 @@ int main(int argc, char **argv) {
                     frames, ms / 1000.0, ms ? frames * 1000.0 / ms : 0.0);
         }
     }
-    if (frames == 0) status = 1;
+    if (frames == 0) {
+        fprintf(stderr, "No input frames\n");
+        status = 1;
+    }
 
 cleanup:
     {

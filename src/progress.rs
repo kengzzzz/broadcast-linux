@@ -106,7 +106,9 @@ impl Progress for Terminal {
     fn advance(&self, done: u64, total: u64) {
         let percent = done * 100 / total.max(1);
         let every = if self.interactive { 1 } else { 10 };
-        if done < total && self.last.get().is_some_and(|last| percent < last + every) {
+        let last = self.last.get();
+        let soon = done < total && last.is_some_and(|last| percent < last + every);
+        if soon || last == Some(percent) {
             return;
         }
         self.last.set(Some(percent));

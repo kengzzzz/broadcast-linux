@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -98,6 +99,24 @@ fn session_display() -> Vec<(String, String)> {
     vars
 }
 
+/// Unlike `BufRead::lines`, a line that isn't UTF-8 doesn't end the reading, so the pipe never
+/// fills up and stalls the worker.
+pub fn log_lines(stderr: impl Read) -> impl Iterator<Item = String> {
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    std::iter::from_fn(move || {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(
+                String::from_utf8_lossy(&bytes)
+                    .trim_end_matches(['\n', '\r'])
+                    .to_owned(),
+            ),
+        }
+    })
+}
+
 pub(crate) fn has_display(vars: &[(String, String)]) -> bool {
     vars.iter()
         .any(|(name, _)| name == "DISPLAY" || name == "WAYLAND_DISPLAY")
@@ -135,5 +154,17 @@ impl Drop for Worker {
         }
         self.signal_group(libc::SIGKILL);
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_past_lines_that_are_not_utf8() {
+        let stderr: &[u8] = b"one\r\nVid\xe9os\nthree";
+        let lines: Vec<String> = log_lines(stderr).collect();
+        assert_eq!(lines, ["one", "Vid\u{fffd}os", "three"]);
     }
 }

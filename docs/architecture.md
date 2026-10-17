@@ -44,6 +44,7 @@ flowchart LR
   - 2 for the first 10 s, and after any round trip over 3 ms (GPU in a low power state or busy with the camera)
   - 1 after 10 s of round trips under 2 ms
   - 3 always for Studio Voice, which takes up to about 12 ms on every other frame
+  - 4 always for Studio Voice with a mic profile, which takes up to about 19 ms
 
   Changes are spread over about a third of a second.
 - **Half a period less:** a 1920-sample frame ends half way into a period or at its end, and reaches the worker with that period, so every frame still gets the whole reserve. [Benchmark](benchmark.md#audio-delay-ms) has other period sizes.
@@ -64,8 +65,16 @@ flowchart LR
 
 - **Decode:** libjpeg-turbo straight to planar YUV, on several cores above 1080p30.
 - **Slow GPU:** if the effects take longer than a webcam frame, the next frame is decoded just before the GPU is free, so it doesn't wait in line.
-- **Output:** written straight into the loopback's buffers with v4l2loopback 0.14+ and `max_buffers=3`.
+- **Output:** written straight into the loopback's buffers with v4l2loopback 0.14+ and `max_buffers=3`. With Frame Generation, the service copies each frame in and spreads the made frames evenly between webcam frames.
 - **Idle:** a placeholder frame keeps the virtual camera listed.
+
+## File Processor
+
+`broadcast-linux process` and the Files page run the same workers on files, with ffmpeg on both ends.
+
+- **Video:** ffmpeg decodes to BGR24 at a constant frame rate, `camera_stream` reads it from a pipe, and ffmpeg encodes its YUYV output to H.264.
+- **Audio:** ffmpeg decodes to 48 kHz float. Each channel gets its own `afx_stream`, and the effect's delay is cut from the start, so the sound stays in sync with the video.
+- **Output:** written under a hidden temporary name beside the result, then renamed without replacing any file.
 
 ## Latency
 

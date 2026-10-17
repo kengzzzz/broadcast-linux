@@ -402,7 +402,18 @@ fn webcam(camera: &CameraConfig) -> Check {
 }
 
 fn rtx_video(paths: &Paths, camera: &CameraConfig) -> Check {
-    let install = Installation::find(paths)?;
+    let install = match Installation::find(paths) {
+        Ok(install) => install,
+        // `nvidia files` already says so.
+        Err(_) if !camera.super_resolution.enabled && !camera.frame_generation.enabled => {
+            return Err(Problem {
+                status: Status::Skip,
+                detail: "the NVIDIA files are not installed".into(),
+                fix: Vec::new(),
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
     let mut ready = Vec::new();
     let mut notes = Vec::new();
     for (feature, enabled) in [

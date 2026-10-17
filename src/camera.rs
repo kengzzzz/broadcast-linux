@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
+use std::io::{self, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Stdio};
@@ -23,7 +23,7 @@ use crate::paths::Paths;
 use crate::status::{self, State};
 use crate::v4l2::Loopback;
 use crate::webcam::{self, Capture, Color, Format};
-use crate::worker::{Launch, Worker};
+use crate::worker::{self, Launch, Worker};
 
 /// Placeholder rate while no effect is running; enough to keep the device listed.
 const PLACEHOLDER_INTERVAL: Duration = Duration::from_millis(200);
@@ -745,7 +745,7 @@ impl CameraLoop {
         let last = Arc::clone(&self.worker_line);
         last.lock().unwrap().clear();
         thread::spawn(move || {
-            for line in BufReader::new(pipes.stderr).lines().map_while(Result::ok) {
+            for line in worker::log_lines(pipes.stderr) {
                 eprintln!("camera worker: {line}");
                 line.clone_into(&mut last.lock().unwrap());
             }

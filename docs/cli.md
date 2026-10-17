@@ -96,6 +96,7 @@ lists every effect.
   Existing files are never replaced.
 - Video effects make H.264 MP4 with AAC audio (libx264, else NVENC, else OpenH264).
 - Audio effects alone copy the video. MP4 and MOV keep their format, others become MKV.
+- Only the first audio track is kept. Other audio tracks and subtitles are left out.
 - WAV and FLAC stay WAV and FLAC, other audio becomes M4A. Audio comes out at 48 kHz,
   with more than two channels mixed to stereo.
 - `--super-resolution` takes the new height (1080, 1440 or 2160) and only enlarges.

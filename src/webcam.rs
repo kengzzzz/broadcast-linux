@@ -551,35 +551,42 @@ fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32)
     if parm.parm[0] & CAP_TIMEPERFRAME == 0 {
         return;
     }
-    if let Some(actual) = slower_fps(parm.parm[2], parm.parm[3], fps) {
-        let mjpeg = format != Format::Mjpeg
-            && find(&list_formats(file), InputFormat::Mjpeg, width, height).is_some();
-        let hint = if mjpeg {
-            "MJPEG or a smaller size may be faster"
-        } else {
-            "a smaller size may be faster"
-        };
-        eprintln!(
-            "camera: {input} gives only {actual} fps as {} at {width}x{height}, not {fps}; {hint}",
-            format.label()
-        );
-    }
+    let Some((actual, slow)) = other_fps(parm.parm[2], parm.parm[3], fps) else {
+        return;
+    };
+    let hint = if !slow {
+        ""
+    } else if format != Format::Mjpeg
+        && find(&list_formats(file), InputFormat::Mjpeg, width, height).is_some()
+    {
+        "; MJPEG or a smaller size may be faster"
+    } else {
+        "; a smaller size may be faster"
+    };
+    eprintln!(
+        "camera: {input} gives {actual} fps as {} at {width}x{height}, not {fps}{hint}",
+        format.label()
+    );
 }
 
-/// The frame rate the driver set, as text, when it is under 90% of `wanted`.
-fn slower_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<String> {
-    if numerator == 0
-        || denominator == 0
-        || u64::from(denominator) * 10 >= u64::from(wanted) * u64::from(numerator) * 9
-    {
+/// The frame rate the driver set, as text, when it is more than 2% off `wanted`, and whether
+/// it is under 90%. Frame Generation's low rates are often rounded, for example 6 to 7.5.
+fn other_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<(String, bool)> {
+    let (num, den, wanted) = (
+        u64::from(numerator),
+        u64::from(denominator),
+        u64::from(wanted),
+    );
+    if num == 0 || den == 0 || (den * 50).abs_diff(wanted * num * 50) <= wanted * num {
         return None;
     }
-    let tenths = (u64::from(denominator) * 10 + u64::from(numerator) / 2) / u64::from(numerator);
-    Some(if tenths % 10 == 0 {
+    let tenths = (den * 10 + num / 2) / num;
+    let text = if tenths % 10 == 0 {
         format!("{}", tenths / 10)
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
-    })
+    };
+    Some((text, den * 10 < wanted * num * 9))
 }
 
 struct Mapping {
@@ -929,14 +936,16 @@ mod tests {
     }
 
     #[test]
-    fn reports_slower_frame_rates() {
-        assert_eq!(slower_fps(1, 5, 30).as_deref(), Some("5"));
-        assert_eq!(slower_fps(2, 15, 30).as_deref(), Some("7.5"));
-        assert_eq!(slower_fps(1001, 30000, 30), None);
-        assert_eq!(slower_fps(1, 30, 30), None);
-        assert_eq!(slower_fps(1, 60, 30), None);
-        assert_eq!(slower_fps(0, 0, 30), None);
-        assert_eq!(slower_fps(1, 0, 30), None);
+    fn reports_other_frame_rates() {
+        assert_eq!(other_fps(1, 5, 30), Some(("5".into(), true)));
+        assert_eq!(other_fps(2, 15, 30), Some(("7.5".into(), true)));
+        assert_eq!(other_fps(2, 15, 8), Some(("7.5".into(), false)));
+        assert_eq!(other_fps(2, 15, 6), Some(("7.5".into(), false)));
+        assert_eq!(other_fps(1, 60, 30), Some(("60".into(), false)));
+        assert_eq!(other_fps(1001, 30000, 30), None);
+        assert_eq!(other_fps(1, 30, 30), None);
+        assert_eq!(other_fps(0, 0, 30), None);
+        assert_eq!(other_fps(1, 0, 30), None);
     }
 
     #[test]

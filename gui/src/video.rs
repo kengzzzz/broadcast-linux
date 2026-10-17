@@ -160,11 +160,9 @@ fn camera_effects(app: &mut App, ui: &mut egui::Ui) {
 fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
     let camera = &app.draft.camera;
     let (width, height, fps) = (camera.width, camera.height, camera.fps);
-    let source = app
-        .webcams
-        .iter()
-        .find(|w| w.path == camera.input)
-        .map(|w| w.upscale_source(camera.input_format, width, height));
+    let webcam = app.webcams.iter().find(|w| w.path == camera.input);
+    let source = webcam.map(|w| w.upscale_source(camera.input_format, width, height));
+    let native_sizes = webcam.map(|w| w.sizes.clone()).unwrap_or_default();
     let upscale_missing = app.missing(Feature::SuperResolution).or_else(|| {
         matches!(source, Some(None)).then(|| {
             format!("Your webcam has no size smaller than {width} × {height} with the same shape.")
@@ -174,6 +172,7 @@ fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
     let draft = &mut app.draft.camera;
     ui.add_enabled_ui(draft.enabled, |ui| {
         let upscale = &mut draft.super_resolution;
+        let upscaling = upscale.enabled;
         ui.add_enabled_ui(upscale_missing.is_none() || upscale.enabled, |ui| {
             effect_row(
                 ui,
@@ -203,6 +202,13 @@ fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
                 }),
             );
         });
+        // An upscaled size the webcam can't capture would stop the camera.
+        if upscaling
+            && !draft.super_resolution.enabled
+            && let Some(size) = native_size(&native_sizes, (draft.width, draft.height))
+        {
+            (draft.width, draft.height) = size;
+        }
         let generation = &mut draft.frame_generation;
         ui.add_enabled_ui(generation_missing.is_none() || generation.enabled, |ui| {
             effect_row(
@@ -226,6 +232,19 @@ fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
             generation.multiplier = multiplier;
         }
     });
+}
+
+/// The largest size in `sizes` with the shape of `size`, else the largest, when `size` isn't
+/// one of them.
+fn native_size(sizes: &[(u32, u32)], (width, height): (u32, u32)) -> Option<(u32, u32)> {
+    if sizes.contains(&(width, height)) {
+        return None;
+    }
+    sizes
+        .iter()
+        .find(|&&(w, h)| u64::from(w) * u64::from(height) == u64::from(h) * u64::from(width))
+        .or(sizes.first())
+        .copied()
 }
 
 fn generation_options(
@@ -643,5 +662,20 @@ fn decode_name(mode: ParallelDecode) -> &'static str {
         ParallelDecode::Auto => "Automatic (above 1080p30)",
         ParallelDecode::On => "On",
         ParallelDecode::Off => "Off",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_shape_when_super_resolution_turns_off() {
+        let sizes = [(1920, 1080), (1280, 960), (1280, 720), (640, 480)];
+        assert_eq!(native_size(&sizes, (3840, 2160)), Some((1920, 1080)));
+        assert_eq!(native_size(&sizes, (2560, 1920)), Some((1280, 960)));
+        assert_eq!(native_size(&sizes, (2000, 1000)), Some((1920, 1080)));
+        assert_eq!(native_size(&sizes, (1280, 720)), None);
+        assert_eq!(native_size(&[], (3840, 2160)), None);
     }
 }
