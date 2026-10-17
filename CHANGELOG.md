@@ -15,6 +15,7 @@ NVIDIA Broadcast 2.3.0: mic profiles, RTX Video Super Resolution and Frame Gener
 - File Processor: the effects on video and audio files, on the Files page or with `broadcast-linux process`. Needs ffmpeg, now a suggested package.
 - Settings window: a mic profile picker, and Super Resolution and Frame Generation rows that say why they are unavailable.
 - `doctor`: new `rtx video` and `ffmpeg` items.
+- Camera: a new size no longer stops the camera while an app uses it. The app gets a black picture until it closes the camera, then the new size applies.
 
 ## 0.4.4 - 2026-10-12
 
