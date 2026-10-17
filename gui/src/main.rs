@@ -2,6 +2,7 @@ mod app;
 mod audio;
 mod config_file;
 mod devices;
+mod files;
 mod pages;
 mod preview;
 mod service;

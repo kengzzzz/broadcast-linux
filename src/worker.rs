@@ -1,6 +1,6 @@
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,11 @@ impl Worker {
             stderr: child.stderr.take().expect("piped stderr"),
         };
         Ok((Self { child }, pipes))
+    }
+
+    /// `None` while the worker runs.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        Ok(self.child.try_wait()?)
     }
 
     fn signal_group(&self, signal: libc::c_int) {

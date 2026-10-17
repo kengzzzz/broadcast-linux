@@ -14,7 +14,9 @@ noise_removal = { enabled = true, strength = 1.0 }
 # Echo removal; combined with noise removal at the higher strength.
 room_echo_removal = { enabled = false, strength = 1.0 }
 # Studio mic voice; overrides noise/echo removal. No strength option.
-studio_voice = { enabled = false }
+# profile: "default" | "bright" | "full" | "warm". A profile adds about 30 ms of delay
+# and needs NVIDIA Broadcast 2.3.0.
+studio_voice = { enabled = false, profile = "default" }
 # Whole minutes to retain the idle mic model after pausing; 0 = unload on pause.
 # With gpu_keep_awake, the model runs on silence until then.
 unload_after_minutes = 2
@@ -67,6 +69,13 @@ studio_light = { enabled = false, strength = 1.0, preset = "neutral" }
 eye_contact = { enabled = false }
 # Zoom in and follow your face as you move. No strength option.
 auto_frame = { enabled = false }
+# Capture the webcam at a smaller size of the same shape and upscale it to width x height
+# with AI. mode: "quality" | "performance". Needs an RTX 30 series or newer GPU.
+super_resolution = { enabled = false, mode = "quality" }
+# Run the webcam at fps / multiplier and make the frames in between with AI.
+# multiplier: 2 | 3 | 4, and fps must divide by it. Adds multiplier - 1 frames of delay at fps.
+# mode: "performance" | "balanced" | "quality". Needs an RTX 40 series or newer GPU.
+frame_generation = { enabled = false, mode = "balanced", multiplier = 2 }
 
 [service]
 # Whole seconds after last reader: pause mic / stop camera; 0 = immediately.

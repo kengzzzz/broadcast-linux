@@ -99,26 +99,7 @@ fn camera_effects(app: &mut App, ui: &mut egui::Ui) {
     let mut pick = false;
     let draft = &mut app.draft.camera;
     ui.add_enabled_ui(draft.enabled, |ui| {
-        let current = background_of(draft);
-        let mut on = current != Background::Real;
-        effect_row(
-            ui,
-            "camera-background",
-            "Virtual background",
-            "Blurs, replaces or removes your background.",
-            &mut on,
-            Some(&mut |ui: &mut egui::Ui| pick = background_options(ui, draft, picking)),
-        );
-        if on != (current != Background::Real) {
-            set_background(
-                draft,
-                if on {
-                    Background::Blur
-                } else {
-                    Background::Real
-                },
-            );
-        }
+        pick = background_row(ui, "camera-background", draft, picking);
         effect_row(
             ui,
             "camera-noise",
@@ -284,6 +265,35 @@ fn generation_options(
         "Pick a frame rate that divides by 2, 3 or 4.".to_owned()
     };
     ui.label(RichText::new(note).small().color(theme::MUTED));
+}
+
+/// The Virtual background row. Returns true when the user asked to pick an image.
+pub fn background_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    draft: &mut CameraConfig,
+    picking: bool,
+) -> bool {
+    let current = background_of(draft);
+    let mut on = current != Background::Real;
+    let mut pick = false;
+    effect_row(
+        ui,
+        id,
+        "Virtual background",
+        "Blurs, replaces or removes your background.",
+        &mut on,
+        Some(&mut |ui: &mut egui::Ui| pick = background_options(ui, draft, picking)),
+    );
+    if on != (current != Background::Real) {
+        let background = if on {
+            Background::Blur
+        } else {
+            Background::Real
+        };
+        set_background(draft, background);
+    }
+    pick
 }
 
 /// Returns true when the user asked to pick a background image.
@@ -494,10 +504,11 @@ fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig, webcam: Option<&
                     .show(ui, |ui| {
                         ui.label("Webcam format");
                         let current = draft.input_format;
-                        let (width, height) = (draft.width, draft.height);
-                        let offered = |format| {
-                            webcam.is_none_or(|w| w.format_for(format, width, height).is_some())
-                        };
+                        let size = (draft.width, draft.height);
+                        let upscale = draft.super_resolution.enabled;
+                        let capture =
+                            move |w: &Webcam, format| capture_format(w, format, size, upscale);
+                        let offered = |format| webcam.is_none_or(|w| capture(w, format).is_some());
                         let label = |format| {
                             if format == InputFormat::Auto || offered(format) {
                                 format_name(format).to_owned()
@@ -527,7 +538,7 @@ fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig, webcam: Option<&
                         ui.end_row();
                         ui.label("Webcam colors");
                         let raw = webcam
-                            .and_then(|w| w.format_for(draft.input_format, width, height))
+                            .and_then(|w| capture(w, draft.input_format))
                             .map_or(draft.input_format != InputFormat::Mjpeg, |format| {
                                 format != Format::Mjpeg
                             });
@@ -583,7 +594,23 @@ fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig, webcam: Option<&
         });
 }
 
-fn preset_name(preset: LightPreset) -> &'static str {
+/// The format the service would capture `format` in, at the size it captures: smaller than
+/// the camera's when Super Resolution upscales.
+fn capture_format(
+    webcam: &Webcam,
+    format: InputFormat,
+    (width, height): (u32, u32),
+    upscale: bool,
+) -> Option<Format> {
+    let (width, height) = if upscale {
+        webcam.upscale_source(format, width, height)?
+    } else {
+        (width, height)
+    };
+    webcam.format_for(format, width, height)
+}
+
+pub fn preset_name(preset: LightPreset) -> &'static str {
     match preset {
         LightPreset::Cooler => "Cooler",
         LightPreset::Cool => "Cool",

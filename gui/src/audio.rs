@@ -37,7 +37,7 @@ pub fn status_line(app: &App, ui: &mut egui::Ui, endpoint: Endpoint) {
     }
 }
 
-fn adjustable(
+pub fn adjustable(
     ui: &mut egui::Ui,
     id: &str,
     title: &str,
@@ -154,7 +154,7 @@ fn mic(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// `missing` says why only Default can be picked.
-fn profile_options(ui: &mut egui::Ui, current: &mut MicProfile, missing: Option<&str>) {
+pub fn profile_options(ui: &mut egui::Ui, current: &mut MicProfile, missing: Option<&str>) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Mic profile");
         egui::ComboBox::from_id_salt("mic-profile")

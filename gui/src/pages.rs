@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use crate::app::{App, Endpoint, Page};
 use crate::setup_task::SetupTask;
 use crate::widgets::{self, Icon};
-use crate::{audio, settings, theme, video};
+use crate::{audio, files, settings, theme, video};
 
 const RAIL_WIDTH: f32 = 78.0;
 
@@ -24,6 +24,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
             let editable = app.file.is_ok();
             match app.page {
                 Page::Settings => settings::page(app, ui),
+                Page::Files => files::page(app, ui),
                 page => {
                     ui.add_enabled_ui(editable, |ui| match page {
                         Page::Audio => audio::page(app, ui),
@@ -57,6 +58,7 @@ fn rail(app: &mut App, ui: &mut egui::Ui) {
             for (page, icon, label) in [
                 (Page::Audio, Icon::Audio, "Audio"),
                 (Page::Video, Icon::Video, "Video"),
+                (Page::Files, Icon::Files, "Files"),
                 (Page::Settings, Icon::Settings, "Settings"),
             ] {
                 let status = match page {
@@ -67,6 +69,7 @@ fn rail(app: &mut App, ui: &mut egui::Ui) {
                             .map(|d| state_color(&d)),
                     ),
                     Page::Video => app.device(Endpoint::Camera).map(|d| state_color(&d)),
+                    Page::Files => app.files.running().then_some(theme::GOOD),
                     Page::Settings => app.setup_needed().map(|_| theme::BAD),
                 };
                 if rail_item(ui, icon, label, app.page == page, status).clicked() {
@@ -139,6 +142,7 @@ fn header(app: &App, ui: &mut egui::Ui) {
                 let title = match app.page {
                     Page::Audio => "Audio",
                     Page::Video => "Video",
+                    Page::Files => "File Processor",
                     Page::Settings => "Settings",
                 };
                 ui.label(RichText::new(title).size(24.0));

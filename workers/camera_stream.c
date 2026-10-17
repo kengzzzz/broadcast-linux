@@ -369,9 +369,10 @@ struct framing {
 #define FRAME_LOST_MS 2000
 
 /* Picks the largest face and eases the crop toward framing it. The crop only retargets
- * when the face leaves a dead zone, so small head movements leave the picture still. */
-static void update_framing(struct framing *f, const NvAR_BBoxes *faces, unsigned width, unsigned height) {
-    ULONGLONG now = GetTickCount64();
+ * when the face leaves a dead zone, so small head movements leave the picture still.
+ * `now` is in milliseconds and never 0. */
+static void update_framing(struct framing *f, const NvAR_BBoxes *faces, unsigned width, unsigned height,
+                           ULONGLONG now) {
     const NvAR_Rect *face = NULL;
     for (unsigned i = 0; i < faces->num_boxes; i++)
         if (!face || faces->boxes[i].width * faces->boxes[i].height > face->width * face->height)
@@ -438,7 +439,7 @@ static void usage(void) {
             "           [--background FILE.bgr | --blur 0..1 | --remove-background]\n"
             "           [--relight MODEL_DIR --hdr FILE.hdr [--strength 0..1]]\n"
             "           [--super-res LEVEL --out-size WxH [--ngx-dir DIR]]\n"
-            "           [--frame-gen 2..4 [--frame-gen-mode 0..2]]\n"
+            "           [--frame-gen 2..4 [--frame-gen-mode 0..2]] [--frame-ms MS] [--out-color COLOR]\n"
             "           < input > output.yuyv\n"
             "FORMAT is bgr24 (default), yuyv, nv12, or planar full-range j420, j422 or j444.\n"
             "COLOR is 601, 709 or 2020, with -full for full range. The default is 601, limited\n"
@@ -453,7 +454,9 @@ static void usage(void) {
             "DIR holds the driver's _nvngx.dll.\n"
             "--frame-gen M makes M - 1 frames between each pair of input frames. Each output slot\n"
             "then holds M frames in display order, the input frame last. Without --shm the first\n"
-            "input frame is written once and every later one M times.\n");
+            "input frame is written once and every later one M times.\n"
+            "--frame-ms times Auto Frame by frame number, MS apart, instead of the clock (for files).\n"
+            "--out-color sets the output's colors, BT.601 limited range by default.\n");
 }
 
 int main(int argc, char **argv) {
@@ -464,10 +467,11 @@ int main(int argc, char **argv) {
     int out_count = 0;
     float strength = 1, denoise_strength = 1;
     float blur_strength = 0.5f;
+    double frame_ms = 0;
     int blur_enabled = 0, remove_background = 0, super_res = -1;
     unsigned width = 0, height = 0, out_width = 0, out_height = 0, multiplier = 1, gen_mode = 1;
     const struct input_format *input = &input_formats[0];
-    const struct input_color *color = NULL;
+    const struct input_color *color = NULL, *out_color = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *next = i + 1 < argc ? argv[i + 1] : NULL;
@@ -494,6 +498,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--ngx-dir") && next) ngx_dir = argv[++i];
         else if (!strcmp(a, "--frame-gen") && next) multiplier = (unsigned)atoi(argv[++i]);
         else if (!strcmp(a, "--frame-gen-mode") && next) gen_mode = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(a, "--frame-ms") && next) frame_ms = atof(argv[++i]);
         else if (!strcmp(a, "--shm") && next) shm_path = argv[++i];
         else if (!strcmp(a, "--out-device") && next) out_device = argv[++i];
         else if (!strcmp(a, "--out-offsets") && next) {
@@ -517,12 +522,13 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        else if (!strcmp(a, "--color") && next) {
+        else if ((!strcmp(a, "--color") || !strcmp(a, "--out-color")) && next) {
+            const struct input_color **target = !strcmp(a, "--color") ? &color : &out_color;
             const char *name = argv[++i];
-            color = NULL;
+            *target = NULL;
             for (size_t c = 0; c < sizeof input_colors / sizeof *input_colors; c++)
-                if (!strcmp(name, input_colors[c].name)) color = &input_colors[c];
-            if (!color) {
+                if (!strcmp(name, input_colors[c].name)) *target = &input_colors[c];
+            if (!*target) {
                 usage();
                 return 2;
             }
@@ -729,7 +735,8 @@ int main(int argc, char **argv) {
     unsigned src_colorspace = color ? (input->colorspace & ~COLOR_BITS) | color->colorspace : input->colorspace;
     for (int k = 0; k < slots; k++) {
         src_slots[k].colorspace = (unsigned char)src_colorspace;
-        out_slots[k].colorspace = NVCV_601 | NVCV_VIDEO_RANGE | NVCV_CHROMA_INTSTITIAL;
+        out_slots[k].colorspace =
+            (unsigned char)((out_color ? out_color->colorspace : NVCV_601 | NVCV_VIDEO_RANGE) | NVCV_CHROMA_INTSTITIAL);
         for (unsigned g = 0; g + 1 < multiplier; g++)
             gen_slots[k][g].colorspace = out_slots[k].colorspace;
     }
@@ -923,7 +930,8 @@ int main(int argc, char **argv) {
         if (faces) {
             face_boxes.num_boxes = 0;
             CHECK("Run(FaceBoxDetection)", ar_run(faces));
-            update_framing(&framing, &face_boxes, width, height);
+            ULONGLONG now = frame_ms > 0 ? 1 + (ULONGLONG)(frames * frame_ms + 0.5) : GetTickCount64();
+            update_framing(&framing, &face_boxes, width, height, now);
             if (framing.height < height - 0.5f) {
                 const double zoom = height / framing.height;
                 const double left = framing.cx - framing.height * width / height / 2,

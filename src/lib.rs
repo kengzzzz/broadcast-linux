@@ -17,6 +17,7 @@ pub mod mjpeg;
 pub mod nvidia;
 pub mod paths;
 pub mod prefix;
+pub mod process;
 pub mod progress;
 pub mod service;
 pub mod setup;

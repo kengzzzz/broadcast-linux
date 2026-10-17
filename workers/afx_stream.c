@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: afx_stream.exe [--profile MODEL_PATH ID] [--offline] KEEP_AWAKE\n"
                         "           EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n"
                         "--profile sets the Studio Voice mic profile. --offline processes every frame of a file:\n"
-                        "nothing is dropped and the GPU is not kept awake.\n");
+                        "nothing is dropped, the GPU is not kept awake, and any failed frame makes it exit with 6.\n");
         return 2;
     }
     int keep_awake = offline ? 0 : atoi(argv[1]);
@@ -278,5 +278,6 @@ int main(int argc, char **argv) {
     for (int i = 0; i < count; i++)
         destroy(stages[i].effect);
     FreeLibrary(afx);
-    return 0;
+    /* A failed frame passes through unprocessed, which a file must not keep. */
+    return offline && failures ? 6 : 0;
 }

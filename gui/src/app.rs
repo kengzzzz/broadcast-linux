@@ -17,6 +17,7 @@ use eframe::egui;
 
 use crate::config_file::{ChangedOnDisk, ConfigFile};
 use crate::devices;
+use crate::files::Files;
 use crate::preview::Preview;
 use crate::service::{self, Link};
 use crate::setup_task::{Outcome, SetupTask};
@@ -26,6 +27,7 @@ use crate::{pages, theme};
 pub enum Page {
     Audio,
     Video,
+    Files,
     Settings,
 }
 
@@ -77,6 +79,7 @@ pub struct App {
     picker: Option<Receiver<Option<String>>>,
     /// Saved, but the service has not taken it yet; `true` when that needs a restart.
     unapplied: Option<bool>,
+    pub files: Files,
 }
 
 /// Refreshed every few seconds on a background thread.
@@ -163,6 +166,7 @@ impl App {
             journal: None,
             picker: None,
             unapplied: None,
+            files: Files::default(),
         };
         app.run_checks(ctx);
         app.refresh_devices();
@@ -247,6 +251,7 @@ impl App {
         match page {
             Page::Audio => self.refresh_devices(),
             Page::Video => self.refresh_camera(),
+            Page::Files => self.files.opened(),
             Page::Settings => self.run_checks(ctx),
         }
     }

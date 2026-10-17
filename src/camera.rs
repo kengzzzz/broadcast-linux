@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -702,21 +702,30 @@ impl CameraLoop {
         tokens: Stdio,
         decoder: &Decoder,
         frames: &SharedFrames,
-        (width, height): (u32, u32),
+        size: (u32, u32),
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
-        let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
-        let mut args = vec![
-            nvidia::windows_path(&models),
-            "--size".into(),
-            format!("{width}x{height}"),
+        let background = self
+            .config
+            .background
+            .as_deref()
+            .map(|image| prepare_background(&self.paths, image, size.0, size.1))
+            .transpose()?;
+        let mut args = effect_args(
+            &self.config,
+            &install,
+            size,
+            (self.width, self.height),
+            background.as_deref(),
+        )?;
+        args.extend([
             "--input".into(),
             decoder.layout().worker_name().into(),
             "--color".into(),
             decoder.color().worker_name().into(),
             "--shm".into(),
             frames.path().context("no shared frames for the worker")?,
-        ];
+        ]);
         if let Some(buffers) = frames.loopback() {
             let offsets: Vec<String> = buffers.offsets().iter().map(u32::to_string).collect();
             args.extend([
@@ -726,48 +735,6 @@ impl CameraLoop {
                 offsets.join(","),
             ]);
         }
-        if self.config.video_noise_removal.enabled {
-            let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
-            args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
-        }
-        if self.config.eye_contact.enabled {
-            let models = install.model_dir(nvidia::EYE_CONTACT_MODELS)?;
-            args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
-        }
-        if self.config.auto_frame.enabled {
-            let models = install.model_dir(nvidia::FACE_DETECTION_MODELS)?;
-            args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
-        }
-        if let Some(background) = &self.config.background {
-            let cache = prepare_background(&self.paths, background, width, height)?;
-            args.extend(["--background".into(), cache.display().to_string()]);
-        }
-        if self.config.background_blur.enabled {
-            args.extend([
-                "--blur".into(),
-                self.config.background_blur.strength.to_string(),
-            ]);
-        }
-        if self.config.background_removal.enabled {
-            args.push("--remove-background".into());
-        }
-        let light = self.config.studio_light;
-        if light.enabled {
-            let models = install.model_dir(nvidia::STUDIO_LIGHT_MODELS)?;
-            args.extend([
-                "--relight".into(),
-                nvidia::windows_path(&models),
-                // Read with winelib fopen, which takes Unix paths.
-                "--hdr".into(),
-                install
-                    .studio_light(light.preset.file())?
-                    .display()
-                    .to_string(),
-                "--strength".into(),
-                light.strength.to_string(),
-            ]);
-        }
-        args.extend(self.rtx_video_args(&install)?);
 
         let (worker, pipes) = Worker::spawn(Launch {
             program: "camera_stream",
@@ -785,46 +752,6 @@ impl CameraLoop {
             }
         });
         Ok((worker, pipes.stdout))
-    }
-
-    /// Arguments for RTX Video Super Resolution and Frame Generation, which run last.
-    fn rtx_video_args(&self, install: &Installation) -> Result<Vec<String>> {
-        let mut args = Vec::new();
-        if self.config.super_resolution.enabled {
-            if let Some(reason) = install.missing(Feature::SuperResolution) {
-                bail!(reason);
-            }
-            let ngx = gpu::ngx_dir().context(gpu::NO_NGX)?;
-            args.extend([
-                "--super-res".into(),
-                self.config
-                    .super_resolution
-                    .mode
-                    .quality_level()
-                    .to_string(),
-                "--out-size".into(),
-                self.size(),
-                "--ngx-dir".into(),
-                nvidia::windows_path(&ngx),
-            ]);
-        }
-        let generation = self.config.frame_generation;
-        if generation.enabled {
-            if let Some(reason) = install.missing(Feature::FrameGeneration) {
-                bail!(reason);
-            }
-            args.extend([
-                "--frame-gen".into(),
-                generation.multiplier.to_string(),
-                "--frame-gen-mode".into(),
-                generation.mode.worker_value().to_string(),
-            ]);
-        }
-        Ok(args)
-    }
-
-    fn size(&self) -> String {
-        format!("{}x{}", self.width, self.height)
     }
 
     fn pump_frames(&mut self) {
@@ -923,6 +850,99 @@ impl CameraLoop {
     }
 }
 
+/// The camera worker's arguments for the effects in `config`, on frames of `size` that
+/// Super Resolution upscales to `out_size`. `background` is the replacement image, already
+/// BGR24 at `size`.
+pub fn effect_args(
+    config: &CameraConfig,
+    install: &Installation,
+    (width, height): (u32, u32),
+    out_size: (u32, u32),
+    background: Option<&Path>,
+) -> Result<Vec<String>> {
+    let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
+    let mut args = vec![
+        nvidia::windows_path(&models),
+        "--size".into(),
+        format!("{width}x{height}"),
+    ];
+    if config.video_noise_removal.enabled {
+        let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
+        args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
+    }
+    if config.eye_contact.enabled {
+        let models = install.model_dir(nvidia::EYE_CONTACT_MODELS)?;
+        args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
+    }
+    if config.auto_frame.enabled {
+        let models = install.model_dir(nvidia::FACE_DETECTION_MODELS)?;
+        args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
+    }
+    if let Some(background) = background {
+        args.extend(["--background".into(), background.display().to_string()]);
+    }
+    if config.background_blur.enabled {
+        args.extend(["--blur".into(), config.background_blur.strength.to_string()]);
+    }
+    if config.background_removal.enabled {
+        args.push("--remove-background".into());
+    }
+    let light = config.studio_light;
+    if light.enabled {
+        let models = install.model_dir(nvidia::STUDIO_LIGHT_MODELS)?;
+        args.extend([
+            "--relight".into(),
+            nvidia::windows_path(&models),
+            // Read with winelib fopen, which takes Unix paths.
+            "--hdr".into(),
+            install
+                .studio_light(light.preset.file())?
+                .display()
+                .to_string(),
+            "--strength".into(),
+            light.strength.to_string(),
+        ]);
+    }
+    args.extend(rtx_video_args(config, install, out_size)?);
+    Ok(args)
+}
+
+/// Arguments for RTX Video Super Resolution and Frame Generation, which run last.
+fn rtx_video_args(
+    config: &CameraConfig,
+    install: &Installation,
+    (width, height): (u32, u32),
+) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if config.super_resolution.enabled {
+        if let Some(reason) = install.missing(Feature::SuperResolution) {
+            bail!(reason);
+        }
+        let ngx = gpu::ngx_dir().context(gpu::NO_NGX)?;
+        args.extend([
+            "--super-res".into(),
+            config.super_resolution.mode.quality_level().to_string(),
+            "--out-size".into(),
+            format!("{width}x{height}"),
+            "--ngx-dir".into(),
+            nvidia::windows_path(&ngx),
+        ]);
+    }
+    let generation = config.frame_generation;
+    if generation.enabled {
+        if let Some(reason) = install.missing(Feature::FrameGeneration) {
+            bail!(reason);
+        }
+        args.extend([
+            "--frame-gen".into(),
+            generation.multiplier.to_string(),
+            "--frame-gen-mode".into(),
+            generation.mode.worker_value().to_string(),
+        ]);
+    }
+    Ok(args)
+}
+
 fn effects_name(config: &CameraConfig) -> String {
     let mut names = Vec::new();
     if config.video_noise_removal.enabled {
@@ -986,8 +1006,14 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
             let _ = fs::remove_file(old.path());
         }
     }
+    fs::write(&cache, background_bgr(&source, width, height)?)?;
+    Ok(cache)
+}
+
+/// The image at `source`, cropped to fill `width`x`height`, as BGR24.
+pub fn background_bgr(source: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
     let read = || -> image::ImageResult<DynamicImage> {
-        let mut decoder = ImageReader::open(&source)?
+        let mut decoder = ImageReader::open(source)?
             .with_guessed_format()?
             .into_decoder()?;
         let orientation = decoder.orientation()?;
@@ -999,9 +1025,7 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
     let rgb = image
         .resize_to_fill(width, height, FilterType::CatmullRom)
         .into_rgb8();
-    let bgr: Vec<u8> = rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect();
-    fs::write(&cache, bgr)?;
-    Ok(cache)
+    Ok(rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect())
 }
 
 pub fn expand_home(path: &str) -> PathBuf {

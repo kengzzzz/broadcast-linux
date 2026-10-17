@@ -77,6 +77,8 @@ overrides:
       - libxi6
       - libxrender1
       - libxkbcommon-x11-0
+    suggests:
+      - ffmpeg
   rpm:
     depends:
       - glibc >= 2.35
@@ -101,6 +103,8 @@ overrides:
       - libXi
       - libXrender
       - libxkbcommon-x11
+    suggests:
+      - ffmpeg-free
 
 rpm:
   summary: NVIDIA Broadcast effects as a virtual mic and camera under Wine

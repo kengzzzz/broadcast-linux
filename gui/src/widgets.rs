@@ -193,6 +193,7 @@ pub fn pane(ui: &mut Ui, rect: Rect, id: &str, add: impl FnOnce(&mut Ui)) {
 pub enum Icon {
     Audio,
     Video,
+    Files,
     Settings,
 }
 
@@ -229,6 +230,30 @@ pub fn paint_icon(ui: &Ui, icon: Icon, center: Pos2, size: f32, color: Color32) 
                 center + vec2(r * 0.4, r * 0.05),
             ];
             painter.add(egui::Shape::convex_polygon(lens, color, Stroke::NONE));
+        }
+        Icon::Files => {
+            let page = Rect::from_center_size(center, vec2(r * 1.25, r * 1.6));
+            let fold = r * 0.45;
+            let outline = vec![
+                page.left_top(),
+                page.right_top() - vec2(fold, 0.0),
+                page.right_top() + vec2(0.0, fold),
+                page.right_bottom(),
+                page.left_bottom(),
+            ];
+            painter.add(egui::Shape::convex_polygon(outline, color, Stroke::NONE));
+            let lines = Stroke::new(size * 0.06, theme::surface(ui).rail);
+            for i in 1..=3 {
+                #[allow(clippy::cast_precision_loss)]
+                let y = page.top() + fold + r * 0.28 * i as f32;
+                painter.line_segment(
+                    [
+                        pos2(page.left() + r * 0.25, y),
+                        pos2(page.right() - r * 0.25, y),
+                    ],
+                    lines,
+                );
+            }
         }
         Icon::Settings => {
             for i in 0..8 {

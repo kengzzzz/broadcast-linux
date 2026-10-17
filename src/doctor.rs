@@ -161,6 +161,7 @@ pub fn check(paths: &Paths) -> Report {
     let service = service();
     let running = service.is_ok();
     report("service", service);
+    report("ffmpeg", ffmpeg());
 
     let config = match Config::load(&paths.config) {
         Ok(config) => {
@@ -284,6 +285,23 @@ fn workers() -> Check {
         )));
     }
     Ok(paths::tilde(&paths::lib_dir()))
+}
+
+fn ffmpeg() -> Check {
+    match output("ffmpeg", &["-version"]) {
+        // "ffmpeg version n9.0.2 Copyright (c) ..."
+        Ok(version) => Ok(version
+            .lines()
+            .next()
+            .and_then(|line| line.split(" Copyright").next())
+            .unwrap_or_default()
+            .to_owned()),
+        Err(_) => Err(Problem {
+            status: Status::Skip,
+            detail: "not installed; only the File Processor needs it".into(),
+            fix: Vec::new(),
+        }),
+    }
 }
 
 fn display() -> Check {

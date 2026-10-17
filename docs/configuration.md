@@ -60,6 +60,10 @@ Use **NVIDIA Broadcast Mic** as the input in your call or recording app. Studio
 Voice takes precedence over noise and room echo removal. Combined noise and echo
 removal uses the higher of their strengths.
 
+Studio Voice can also use a mic profile, Bright, Full or Warm, as on Windows. Pick
+it under **Studio Voice** or set `studio_voice = { enabled = true, profile = "warm" }`.
+Profiles need NVIDIA Broadcast 2.3.0 and add about 30 ms of delay.
+
 ## Speaker
 
 Turn on **Virtual speaker** on the **Audio** page and choose your real output. In the
@@ -81,5 +85,30 @@ Replacement images support `~/` paths and are scaled to fill the frame.
 
 With all camera effects off, the webcam passes through. With all mic effects off,
 the microphone passes through.
+
+**Super Resolution** captures the webcam at a smaller size of the same shape, for
+example 1280 × 720 for 1920 × 1080, and upscales it with AI. Pick the output size in the
+menu under the preview. **Quality** looks best and **Performance** uses less GPU. It
+needs an RTX 30 series or newer GPU and the NVIDIA driver's `_nvngx.dll`, which the
+driver installs in `nvidia/wine` beside `libGLX_nvidia.so.0`.
+
+**Frame Generation** runs the webcam at the frame rate divided by the multiplier and
+makes the frames in between with AI. For example, 60 fps at 2× captures 30 fps. The
+frame rate must divide by the multiplier. Each made frame adds one frame of delay at
+the output rate, for example about 17 ms at 60 fps with 2×. It needs an RTX 40 series
+or newer GPU.
+
+Both run after the other effects. The `rtx video` item of `broadcast-linux doctor`
+says whether they can run on your GPU and NVIDIA files.
+
+## File Processor
+
+The **Files** page runs the effects on video and audio files, like NVIDIA's File
+Processor on Windows. Add files or a folder, turn on effects, choose where the new
+files go and click **Process**. Its settings aren't saved in the config. Dropping
+files on the window works in X11 sessions only.
+
+It needs `ffmpeg`. [CLI usage](cli.md#process-files) covers the terminal command and
+the files it makes.
 
 See [CLI usage](cli.md) for camera module setup, service commands and diagnostics.

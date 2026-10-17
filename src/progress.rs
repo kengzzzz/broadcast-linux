@@ -57,17 +57,28 @@ pub fn copy(
 pub struct Terminal {
     interactive: bool,
     last: Cell<Option<u64>>,
+    timed: bool,
 }
 
 impl Terminal {
+    /// Shows `advance` amounts as megabytes.
     pub fn new() -> Self {
         Self {
             interactive: io::stderr().is_terminal(),
             last: Cell::new(None),
+            timed: false,
         }
     }
 
-    fn end_line(&self) {
+    /// Shows `advance` amounts, which are milliseconds of media, as minutes and seconds.
+    pub fn timed() -> Self {
+        let mut terminal = Self::new();
+        terminal.timed = true;
+        terminal
+    }
+
+    /// Ends a percentage line, so other output starts on a line of its own.
+    pub fn end_line(&self) {
         if self.last.take().is_some() && self.interactive {
             eprintln!();
         }
@@ -100,6 +111,16 @@ impl Progress for Terminal {
         }
         self.last.set(Some(percent));
         let end = if self.interactive { "\r" } else { "\n" };
-        eprint!("  {percent:3}%  {} / {} MB{end}", done >> 20, total >> 20);
+        let amount = if self.timed {
+            format!("{} / {}", clock(done), clock(total))
+        } else {
+            format!("{} / {} MB", done >> 20, total >> 20)
+        };
+        eprint!("  {percent:3}%  {amount}{end}");
     }
+}
+
+fn clock(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }

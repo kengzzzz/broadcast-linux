@@ -40,6 +40,15 @@ impl AudioEffect {
             ),
         }
     }
+
+    /// Samples at 48 kHz that the output lags the input, measured on speech. A mic profile
+    /// adds 30 ms to Studio Voice.
+    pub fn delay(self, profiled: bool) -> usize {
+        match self {
+            Self::StudioVoiceLowLatency if !profiled => 1920,
+            _ => 3360,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -77,7 +86,7 @@ pub struct Stage {
 }
 
 /// The Studio Voice mic profiles Broadcast offers. Default turns the profile model off.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MicProfile {
     #[default]
@@ -222,7 +231,7 @@ fn stages(noise: Adjustable, echo: Adjustable, studio_voice: bool) -> Vec<Stage>
     stages
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum LightPreset {
     Cooler,
@@ -319,7 +328,7 @@ pub enum InputColor {
     Bt709Full,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum SuperResolutionMode {
     #[default]
@@ -355,7 +364,7 @@ impl Default for SuperResolution {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameGenerationMode {
     Performance,
@@ -454,6 +463,18 @@ impl CameraConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_effects()?;
+        let generation = self.frame_generation;
+        anyhow::ensure!(
+            !generation.enabled || self.fps.is_multiple_of(generation.multiplier),
+            "with frame generation, camera.fps must be a multiple of {}",
+            generation.multiplier
+        );
+        Ok(())
+    }
+
+    /// The checks that also apply to files, which keep their own frame rate.
+    pub fn validate_effects(&self) -> Result<()> {
         let backgrounds = usize::from(self.background.is_some())
             + usize::from(self.background_blur.enabled)
             + usize::from(self.background_removal.enabled);
@@ -465,15 +486,9 @@ impl CameraConfig {
             (0.0..=1.0).contains(&self.background_blur.strength),
             "camera.background_blur.strength must be between 0.0 and 1.0"
         );
-        let generation = self.frame_generation;
         anyhow::ensure!(
-            (2..=4).contains(&generation.multiplier),
+            (2..=4).contains(&self.frame_generation.multiplier),
             "camera.frame_generation.multiplier must be 2, 3 or 4"
-        );
-        anyhow::ensure!(
-            !generation.enabled || self.fps.is_multiple_of(generation.multiplier),
-            "with frame generation, camera.fps must be a multiple of {}",
-            generation.multiplier
         );
         Ok(())
     }
@@ -731,6 +746,47 @@ mod tests {
         let mut new = old.clone();
         new.speaker.enabled = true;
         assert!(needs_restart(&old, &new));
+    }
+
+    #[test]
+    fn parses_profiles_and_rtx_video() {
+        let config = Config::parse(
+            "[mic]\nstudio_voice = { profile = \"warm\" }\n[camera]\nfps = 60\n\
+             super_resolution = {}\nframe_generation = { multiplier = 3 }",
+        )
+        .unwrap();
+        assert_eq!(config.mic.profile(), Some(5));
+        let camera = &config.camera;
+        assert!(camera.super_resolution.enabled && camera.has_effects());
+        assert_eq!(camera.super_resolution.mode.quality_level(), 4);
+        assert_eq!(camera.frame_generation.mode, FrameGenerationMode::Balanced);
+        assert_eq!((camera.frame_multiplier(), camera.capture_fps()), (3, 20));
+
+        let profile = |toml: &str| Config::parse(toml).unwrap().mic.profile();
+        assert_eq!(
+            profile("[mic]\nstudio_voice = {}"),
+            None,
+            "default is no profile"
+        );
+        assert_eq!(
+            profile("[mic]\nstudio_voice = { enabled = false, profile = \"full\" }"),
+            None
+        );
+        assert!(Config::parse("[mic]\nstudio_voice = { profile = \"thin\" }").is_err());
+    }
+
+    #[test]
+    fn frame_generation_needs_a_dividing_frame_rate() {
+        let camera = |settings: &str| Config::parse(&format!("[camera]\n{settings}"));
+        assert!(camera("fps = 30\nframe_generation = { multiplier = 4 }").is_err());
+        assert!(camera("fps = 60\nframe_generation = { multiplier = 4 }").is_ok());
+        assert!(camera("fps = 30\nframe_generation = { enabled = false, multiplier = 4 }").is_ok());
+        assert!(camera("frame_generation = { enabled = false, multiplier = 5 }").is_err());
+        let files: CameraConfig =
+            toml::from_str("fps = 30\nframe_generation = { multiplier = 4 }").unwrap();
+        files
+            .validate_effects()
+            .expect("files keep their own frame rate");
     }
 
     #[test]

@@ -21,9 +21,9 @@ use crate::service::{Event, EventSender, LinkEnd};
 use crate::status::{self, State};
 use crate::worker::{Launch, Worker};
 
-const RATE: u32 = 48_000;
+pub(crate) const RATE: u32 = 48_000;
 /// Broadcast's audio models all run on fixed 40 ms frames at 48 kHz.
-const FRAME: usize = 1920;
+pub(crate) const FRAME: usize = 1920;
 /// 5.3 ms periods, so the reserve fits in one. `LATENCY` must match `PERIOD`.
 const PERIOD: usize = 256;
 const LATENCY: &str = "256/48000";
@@ -1026,34 +1026,17 @@ impl AudioDevice {
 
     /// The worker's arguments and the output reserve its effects need.
     fn worker_args(&self, install: &Installation) -> Result<(Vec<String>, usize)> {
-        let studio_voice = self
-            .settings
-            .stages
+        let stages = &self.settings.stages;
+        let args = worker_args(
+            install,
+            stages,
+            self.settings.profile,
+            Some(self.settings.keep_awake),
+        )?;
+        let studio_voice = stages
             .iter()
             .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency);
-        let profile = self.settings.profile.filter(|_| studio_voice);
-        let mut args = Vec::new();
-        if let Some(id) = profile {
-            if let Some(reason) = install.missing(Feature::MicProfiles) {
-                bail!(reason);
-            }
-            let (folder, file) = nvidia::MIC_PROFILES;
-            args.extend([
-                "--profile".into(),
-                nvidia::windows_path(&install.model(folder, file)?),
-                id.to_string(),
-            ]);
-        }
-        args.push(u8::from(self.settings.keep_awake).to_string());
-        for stage in &self.settings.stages {
-            let (folder, file) = stage.effect.model();
-            args.extend([
-                stage.effect.selector().to_owned(),
-                nvidia::windows_path(&install.model(folder, file)?),
-                stage.strength.to_string(),
-            ]);
-        }
-        let reserve = if profile.is_some() {
+        let reserve = if studio_voice && self.settings.profile.is_some() {
             MIC_PROFILE_RESERVE
         } else if studio_voice {
             STUDIO_VOICE_RESERVE
@@ -1258,6 +1241,44 @@ fn playback_process(stream: &pw::stream::Stream, rt: &Rt) {
     *chunk.offset_mut() = 0;
     *chunk.stride_mut() = 4;
     *chunk.size_mut() = u32::try_from(n * 4).unwrap_or(0);
+}
+
+/// The audio worker's arguments for `stages`. `profile` only applies to Studio Voice.
+/// `keep_awake` is `None` for a file, which the worker reads whole as fast as it can.
+pub fn worker_args(
+    install: &Installation,
+    stages: &[Stage],
+    profile: Option<u32>,
+    keep_awake: Option<bool>,
+) -> Result<Vec<String>> {
+    let studio_voice = stages
+        .iter()
+        .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency);
+    let mut args = Vec::new();
+    if let Some(id) = profile.filter(|_| studio_voice) {
+        if let Some(reason) = install.missing(Feature::MicProfiles) {
+            bail!(reason);
+        }
+        let (folder, file) = nvidia::MIC_PROFILES;
+        args.extend([
+            "--profile".into(),
+            nvidia::windows_path(&install.model(folder, file)?),
+            id.to_string(),
+        ]);
+    }
+    match keep_awake {
+        Some(keep_awake) => args.push(u8::from(keep_awake).to_string()),
+        None => args.extend(["--offline".into(), "0".into()]),
+    }
+    for stage in stages {
+        let (folder, file) = stage.effect.model();
+        args.extend([
+            stage.effect.selector().to_owned(),
+            nvidia::windows_path(&install.model(folder, file)?),
+            stage.strength.to_string(),
+        ]);
+    }
+    Ok(args)
 }
 
 fn chain_name(stages: &[Stage]) -> String {
