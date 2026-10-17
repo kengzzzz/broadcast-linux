@@ -1,10 +1,10 @@
-use broadcast_linux::VERSION;
 use broadcast_linux::camera::expand_home;
 use broadcast_linux::graph::AudioNode;
 use broadcast_linux::status::{Device, State};
+use broadcast_linux::{VERSION, setup};
 use eframe::egui::{self, Color32, RichText, Sense, vec2};
 
-use crate::app::{App, Endpoint, Page};
+use crate::app::{App, Endpoint, Page, release};
 use crate::setup_task::SetupTask;
 use crate::widgets::{self, Icon};
 use crate::{audio, files, settings, theme, video};
@@ -70,7 +70,13 @@ fn rail(app: &mut App, ui: &mut egui::Ui) {
                     ),
                     Page::Video => app.device(Endpoint::Camera).map(|d| state_color(&d)),
                     Page::Files => app.files.running().then_some(theme::GOOD),
-                    Page::Settings => app.setup_needed().map(|_| theme::BAD),
+                    Page::Settings => app.setup_needed().map(|_| {
+                        if app.update_from().is_some() {
+                            theme::WARN
+                        } else {
+                            theme::BAD
+                        }
+                    }),
                 };
                 if rail_item(ui, icon, label, app.page == page, status).clicked() {
                     let ctx = ui.ctx().clone();
@@ -281,9 +287,18 @@ fn banners(app: &mut App, ui: &mut egui::Ui) {
     if let Some(reason) = app.setup_needed().map(str::to_owned)
         && app.page != Page::Settings
     {
+        let update_from = app.update_from().map(str::to_owned);
         warning(ui, theme::WARN, |ui| {
-            ui.label(RichText::new("Setup is not finished").strong());
-            ui.label(reason);
+            if let Some(old) = &update_from {
+                ui.label(RichText::new("NVIDIA's files have an update").strong());
+                ui.label(format!(
+                    "Your effects run on NVIDIA Broadcast {old} until you install {}.",
+                    release(setup::BUILD)
+                ));
+            } else {
+                ui.label(RichText::new("Setup is not finished").strong());
+                ui.label(reason);
+            }
             if ui.button("Open Settings").clicked() {
                 app.show(Page::Settings, &ctx);
             }
@@ -463,6 +478,12 @@ fn dialogs(app: &mut App, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_release_of_a_build() {
+        assert_eq!(release("2.3.0.71988672"), "2.3.0");
+        assert_eq!(release("2.2"), "2.2");
+    }
 
     #[test]
     fn drawing_keeps_hand_written_values() {

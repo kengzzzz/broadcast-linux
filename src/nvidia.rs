@@ -83,14 +83,7 @@ impl Installation {
 
     /// Why `feature` can't run with these files, or `None` when it can.
     pub fn missing(&self, feature: Feature) -> Option<String> {
-        let present = match feature {
-            Feature::MicProfiles => self.model(MIC_PROFILES.0, MIC_PROFILES.1).is_ok(),
-            _ => feature
-                .runtime_files()
-                .iter()
-                .all(|file| self.runtime.join(file).is_file()),
-        };
-        if present {
+        if self.has_files(feature) {
             let no_ngx = feature == Feature::SuperResolution && crate::gpu::ngx_dir().is_none();
             return no_ngx.then(|| crate::gpu::NO_NGX.into());
         }
@@ -107,6 +100,29 @@ impl Installation {
                 crate::setup::BUILD
             )
         })
+    }
+
+    /// The build in use, if older than the pinned one.
+    pub fn older_build(&self) -> Option<String> {
+        if self.build.ends_with(crate::setup::BUILD) {
+            return None;
+        }
+        Some(self.build.file_name()?.to_string_lossy().into_owned())
+    }
+
+    /// True when the build in use is older and lacks `feature`.
+    pub fn needs_setup(&self, feature: Feature) -> bool {
+        self.older_build().is_some() && !self.has_files(feature)
+    }
+
+    fn has_files(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::MicProfiles => self.model(MIC_PROFILES.0, MIC_PROFILES.1).is_ok(),
+            _ => feature
+                .runtime_files()
+                .iter()
+                .all(|file| self.runtime.join(file).is_file()),
+        }
     }
 
     /// Fails on the first asset a worker could load but cannot find.
@@ -235,6 +251,35 @@ mod tests {
         complete("99.0.0.1");
         complete(crate::setup::BUILD);
         assert_eq!(installed_build(&dir), Some(dir.join(crate::setup::BUILD)));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn older_builds_need_setup_for_new_effects() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-features-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("runtime")).unwrap();
+        let install = |build: &str| Installation {
+            runtime: dir.join("runtime"),
+            models: dir.join("models"),
+            studio_light: dir.join("light"),
+            build: dir.join(build),
+        };
+        let old = install("2.2.1.58338310");
+        assert_eq!(old.older_build().as_deref(), Some("2.2.1.58338310"));
+        assert!(old.needs_setup(Feature::FrameGeneration));
+        assert!(old.needs_setup(Feature::MicProfiles));
+        fs::write(dir.join("runtime/nvVFXVideoFrameGeneration.dll"), "").unwrap();
+        assert!(
+            !old.needs_setup(Feature::FrameGeneration),
+            "an older build with it"
+        );
+
+        let pinned = install(crate::setup::BUILD);
+        assert_eq!(pinned.older_build(), None);
+        assert!(!pinned.needs_setup(Feature::SuperResolution));
+        assert!(pinned.missing(Feature::SuperResolution).is_some());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

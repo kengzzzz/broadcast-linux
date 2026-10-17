@@ -51,6 +51,7 @@ pub struct Checks {
     pub report: Report,
     /// Effects the installed files can't run, with the reason.
     pub missing: Vec<(Feature, String)>,
+    pub older_build: Option<String>,
 }
 
 pub struct App {
@@ -281,20 +282,29 @@ impl App {
                 Ok(gpu) => setup::needed(&paths, gpu.generation),
                 Err(e) => Some(e.clone()),
             };
-            let missing = Installation::find(&paths).map_or_else(
-                |_| Vec::new(),
-                |install| {
-                    Feature::ALL
-                        .into_iter()
-                        .filter_map(|feature| Some((feature, install.missing(feature)?)))
-                        .collect()
-                },
-            );
+            let install = Installation::find(&paths).ok();
+            let missing = install.as_ref().map_or_else(Vec::new, |install| {
+                Feature::ALL
+                    .into_iter()
+                    .filter_map(|feature| {
+                        let reason = if install.needs_setup(feature) {
+                            format!(
+                                "Needs NVIDIA Broadcast {}. Click “Download and install” in Settings.",
+                                release(setup::BUILD)
+                            )
+                        } else {
+                            install.missing(feature)?
+                        };
+                        Some((feature, reason))
+                    })
+                    .collect()
+            });
             let checks = Checks {
                 gpu: gpu.map(|g| format!("{} ({})", g.name, g.generation)),
                 setup_needed,
                 report: doctor::check(&paths),
                 missing,
+                older_build: install.as_ref().and_then(Installation::older_build),
             };
             let _ = tx.send(checks);
             ctx.request_repaint();
@@ -308,6 +318,14 @@ impl App {
 
     pub fn setup_needed(&self) -> Option<&str> {
         self.checks.as_ref()?.setup_needed.as_deref()
+    }
+
+    /// The older release in use, when setup only has to update NVIDIA's files.
+    pub fn update_from(&self) -> Option<&str> {
+        let checks = self.checks.as_ref()?;
+        checks.setup_needed.as_ref()?;
+        checks.gpu.as_ref().ok()?;
+        checks.older_build.as_deref().map(release)
     }
 
     /// Why `feature` can't run. `None` also until the checks finish.
@@ -554,6 +572,14 @@ pub fn device_summary(device: &Device) -> (egui::Color32, String) {
         Some(error) => (theme::BAD, format!("{text}: {error}")),
         None => (color, text),
     }
+}
+
+/// "2.3.0" of the build "2.3.0.71988672".
+pub fn release(build: &str) -> &str {
+    build
+        .match_indices('.')
+        .nth(2)
+        .map_or(build, |(at, _)| &build[..at])
 }
 
 pub const IMAGE_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];

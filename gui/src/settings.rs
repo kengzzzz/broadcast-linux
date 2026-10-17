@@ -1,8 +1,8 @@
-use broadcast_linux::VERSION;
 use broadcast_linux::doctor::Status as Check;
+use broadcast_linux::{VERSION, setup};
 use eframe::egui::{self, RichText};
 
-use crate::app::App;
+use crate::app::{App, release};
 use crate::pages::{commands_list, fixed_id, whole_number};
 use crate::setup_task::SetupTask;
 use crate::widgets::{self, card, section_title};
@@ -111,7 +111,17 @@ fn nvidia_files(app: &mut App, ui: &mut egui::Ui) {
                 }
                 match &checks.setup_needed {
                     Some(reason) => {
-                        ui.colored_label(theme::WARN, reason);
+                        match app.update_from() {
+                            Some(old) => ui.colored_label(
+                                theme::WARN,
+                                format!(
+                                    "NVIDIA Broadcast {} is available. Your effects run on {old} \
+                                     until you install it.",
+                                    release(setup::BUILD)
+                                ),
+                            ),
+                            None => ui.colored_label(theme::WARN, reason),
+                        };
                         ui.label(
                             "Downloads NVIDIA Broadcast for your GPU (about 2.2 to 2.4 GB) from NVIDIA, \
                              asks you to accept NVIDIA's licence, and extracts the effects \

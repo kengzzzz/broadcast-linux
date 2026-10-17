@@ -12,7 +12,12 @@ esac
 modprobe v4l2loopback 2>/dev/null || true
 
 if [ -z "${fresh:-}" ]; then
-    echo "broadcast-linux: run 'systemctl --user restart broadcast-linux' to use the new version"
+    cat <<'MSG'
+broadcast-linux: run 'systemctl --user restart broadcast-linux' to use the new version
+If the settings window then says NVIDIA's files have an update, click "Download and
+install" there, or run 'broadcast-linux setup'. Your effects keep working on the older
+files until then.
+MSG
     exit 0
 fi
 cat <<'MSG'
