@@ -3,7 +3,7 @@
 NVIDIA Broadcast effects on Linux, with a native settings window and virtual mic,
 speaker and camera. Effects run through Wine and start when an app uses them.
 
-![Settings window: microphone and camera effects, then the setup checks](docs/demo.gif)
+![Settings window: mic and camera effects with the GPU load bar, then the system check](docs/demo.gif)
 
 - **Microphone:** noise removal, room echo removal, Studio Voice with mic profiles
 - **Speaker:** noise and room echo removal for incoming call audio
