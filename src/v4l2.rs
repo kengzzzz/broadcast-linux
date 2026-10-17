@@ -314,14 +314,42 @@ fn open_output(path: &str, width: u32, height: u32) -> Result<File> {
     }
     // While another app holds the device, the driver keeps its format and reports
     // success anyway; frames of the requested size would then be garbled.
-    let (w, h) = (format.pix.width, format.pix.height);
-    if (w, h) != (width, height) || format.pix.pixelformat != YUYV {
+    if format.pix.pixelformat != YUYV {
         bail!(
-            "{path} is still in use at {w}x{h}; close the apps using the camera, then restart the service"
+            "{path} is in use in another pixel format; close the apps using the camera, then restart the service"
         );
+    }
+    let (w, h) = (format.pix.width, format.pix.height);
+    if (w, h) != (width, height) {
+        return Err(InUse {
+            path: path.to_owned(),
+            width: w,
+            height: h,
+        }
+        .into());
     }
     Ok(file)
 }
+
+/// Apps hold the loopback at this size, so the driver kept it.
+#[derive(Debug)]
+pub struct InUse {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl fmt::Display for InUse {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} is in use at {}x{}",
+            self.path, self.width, self.height
+        )
+    }
+}
+
+impl std::error::Error for InUse {}
 
 fn map_buffers(file: &File, frame_bytes: usize) -> Result<Buffers> {
     // Before 0.14 the driver folds buffer numbers onto however many buffers a reader

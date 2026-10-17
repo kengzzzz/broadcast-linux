@@ -41,6 +41,9 @@ Restart instead when changing these fields:
 systemctl --user restart broadcast-linux
 ```
 
+Apps that still use the camera at the old size keep it, with a black picture, until they
+close the camera. Then it switches to the new size.
+
 ## Microphone
 
 Select your real microphone on the **Audio** page and click **Apply**. To make

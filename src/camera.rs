@@ -21,7 +21,7 @@ use crate::gpu;
 use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::status::{self, State};
-use crate::v4l2::Loopback;
+use crate::v4l2::{InUse, Loopback};
 use crate::webcam::{self, Capture, Color, Format};
 use crate::worker::{self, Launch, Worker};
 
@@ -62,13 +62,25 @@ impl Camera {
         }));
         let shared = Arc::clone(&status);
         let thread = thread::spawn(move || {
-            let loopback = match Loopback::open(&config.device, config.width, config.height) {
-                Ok(loopback) => loopback,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
+            let mut waiting = Waiting {
+                config,
+                idle_timeout,
+                commands: &receiver,
+                status: &shared,
+                notify: &notify,
+                ready: Some(ready_tx),
+                logged: None,
+                retry: Duration::from_secs(1),
             };
+            let Some(loopback) = waiting.open() else {
+                return;
+            };
+            let Waiting {
+                config,
+                idle_timeout,
+                ready,
+                ..
+            } = waiting;
             let mut camera = CameraLoop::new(paths, config, idle_timeout, loopback, receiver);
             camera.status = shared;
             camera.notify = notify;
@@ -77,7 +89,9 @@ impl Camera {
             if let Err(e) = unsafe { camera.loopback.write_frame(&camera.placeholder) } {
                 eprintln!("camera: writing the first placeholder frame: {e}");
             }
-            let _ = ready_tx.send(Ok(()));
+            if let Some(ready) = ready {
+                let _ = ready.send(Ok(()));
+            }
             camera.run();
         });
         ready_rx.recv().context("camera thread ended early")??;
@@ -104,6 +118,137 @@ impl Drop for Camera {
             let _ = thread.join();
         }
     }
+}
+
+/// The camera thread until the loopback opens at the configured size.
+struct Waiting<'a> {
+    config: CameraConfig,
+    idle_timeout: Duration,
+    commands: &'a Receiver<Control>,
+    status: &'a Mutex<status::Device>,
+    notify: &'a Notify,
+    ready: Option<Sender<Result<()>>>,
+    /// The held and the configured size last logged.
+    logged: Option<((u32, u32), (u32, u32))>,
+    /// An app may keep the device, and its size, without reading, so retries back off.
+    retry: Duration,
+}
+
+impl Waiting<'_> {
+    /// `None` on `Quit`, or on an error, which goes to `ready` or the status.
+    fn open(&mut self) -> Option<Loopback> {
+        let error = loop {
+            let config = &self.config;
+            match Loopback::open(&config.device, config.width, config.height) {
+                Ok(loopback) => return Some(loopback),
+                Err(e) => match e
+                    .downcast_ref::<InUse>()
+                    .map(|held| (held.width, held.height))
+                {
+                    Some(held) => match self.hold(held) {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(e) => break e,
+                    },
+                    None => break e,
+                },
+            }
+        };
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(Err(error));
+        } else {
+            eprintln!("camera: disabled: {error:#}");
+            let error = Some(format!("{error:#}"));
+            set_status(self.status, self.notify, State::Unavailable, 0, error);
+        }
+        None
+    }
+
+    /// Sends placeholder frames at `held`, so apps holding that size don't stall. True once
+    /// they close it or the config asks for `held`, false on `Quit`.
+    fn hold(&mut self, (width, height): (u32, u32)) -> Result<bool> {
+        let mut loopback = Loopback::open(&self.config.device, width, height)?;
+        let frame = placeholder(width, height);
+        // SAFETY: no session runs, so nothing else writes the loopback's buffers.
+        unsafe { loopback.write_frame(&frame) }?;
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(Ok(()));
+        }
+        let retry_at = Instant::now() + self.retry;
+        self.retry = (self.retry * 2).min(Duration::from_secs(30));
+        let mut in_use = true;
+        loop {
+            match self.commands.try_recv() {
+                Ok(Control::Quit) | Err(TryRecvError::Disconnected) => return Ok(false),
+                Ok(Control::Reload {
+                    config,
+                    idle_timeout,
+                }) => {
+                    self.config = config;
+                    self.idle_timeout = idle_timeout;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+            let (w, h) = (self.config.width, self.config.height);
+            if (w, h) == (width, height) || (!in_use && Instant::now() >= retry_at) {
+                return Ok(true);
+            }
+            if self.logged != Some(((width, height), (w, h))) {
+                self.logged = Some(((width, height), (w, h)));
+                eprintln!(
+                    "camera: {} is in use at {width}x{height}; it switches to {w}x{h} once the apps using it close it",
+                    self.config.device
+                );
+            }
+            set_status(
+                self.status,
+                self.notify,
+                State::Unavailable,
+                usize::from(in_use),
+                Some(format!(
+                    "an app is using it at {width} × {height}. It switches to {w} × {h} once the app closes the camera."
+                )),
+            );
+            // SAFETY: as above.
+            let _ = unsafe { loopback.write_frame(&frame) };
+            let mut fd = libc::pollfd {
+                fd: loopback.fd(),
+                events: libc::POLLPRI,
+                revents: 0,
+            };
+            let timeout = i32::try_from(PLACEHOLDER_INTERVAL.as_millis()).unwrap_or(i32::MAX);
+            // SAFETY: one valid pollfd for the duration of the call.
+            unsafe { libc::poll(&raw mut fd, 1, timeout) };
+            if let Some(usage) = loopback.take_usage() {
+                in_use = usage;
+            }
+        }
+    }
+}
+
+fn set_status(
+    status: &Mutex<status::Device>,
+    notify: &Notify,
+    state: State,
+    readers: usize,
+    error: Option<String>,
+) {
+    let device = status::Device {
+        state,
+        readers,
+        error,
+    };
+    let mut status = status.lock().unwrap();
+    if *status != device {
+        *status = device;
+        drop(status);
+        notify();
+    }
+}
+
+/// Black, in YUYV.
+fn placeholder(width: u32, height: u32) -> Vec<u8> {
+    [16u8, 128].repeat(width as usize * height as usize)
 }
 
 /// Fields drop in order: closing `tokens` and stopping the worker unblock the feed
@@ -388,7 +533,6 @@ impl CameraLoop {
         commands: Receiver<Control>,
     ) -> Self {
         let (width, height) = (config.width, config.height);
-        let frame = width as usize * height as usize * 2;
         Self {
             paths,
             config,
@@ -402,7 +546,7 @@ impl CameraLoop {
             idle_since: None,
             retry_at: None,
             failures: 0,
-            placeholder: [16u8, 128].repeat(frame / 2),
+            placeholder: placeholder(width, height),
             error: None,
             worker_line: Arc::default(),
             status: Arc::default(),
@@ -463,17 +607,13 @@ impl CameraLoop {
             Some(s) if !s.live => State::Loading,
             Some(_) => State::Running,
         };
-        let device = status::Device {
+        set_status(
+            &self.status,
+            &self.notify,
             state,
-            readers: usize::from(self.in_use),
-            error: self.error.clone(),
-        };
-        let mut status = self.status.lock().unwrap();
-        if *status != device {
-            *status = device;
-            drop(status);
-            (self.notify)();
-        }
+            usize::from(self.in_use),
+            self.error.clone(),
+        );
     }
 
     fn fail(&mut self, message: String) {

@@ -358,6 +358,13 @@ impl App {
             return;
         }
         let restart = self.restart_needed();
+        let camera = &self.draft.camera;
+        let resized = self.saved().is_some_and(|saved| {
+            (saved.camera.width, saved.camera.height) != (camera.width, camera.height)
+        });
+        let camera_in_use = self
+            .device(Endpoint::Camera)
+            .is_some_and(|camera| camera.readers > 0);
         let Ok(file) = &mut self.file else {
             return;
         };
@@ -383,7 +390,13 @@ impl App {
             self.preview = None;
             self.spawn("Restarting the service…", ctx, move || {
                 link.restart()?;
-                Ok("Applied; the service restarted.".into())
+                Ok(if resized && camera_in_use {
+                    "Applied; the service restarted. Apps using the camera keep the old size \
+                     until they close it."
+                } else {
+                    "Applied; the service restarted."
+                }
+                .into())
             });
         } else {
             self.spawn("Applying…", ctx, move || {

@@ -67,6 +67,7 @@ flowchart LR
 - **Slow GPU:** if the effects take longer than a webcam frame, the next frame is decoded just before the GPU is free, so it doesn't wait in line.
 - **Output:** written straight into the loopback's buffers with v4l2loopback 0.14+ and `max_buffers=3`. With Frame Generation, the service copies each frame in and spreads the made frames evenly between webcam frames.
 - **Idle:** a placeholder frame keeps the virtual camera listed.
+- **New size:** apps that hold the virtual camera at the old size across a restart get a black frame five times a second, so they don't stall. Once they close it, the service reopens it at the new size.
 
 ## File Processor
 
