@@ -23,7 +23,7 @@ options=(!strip !debug)
 install=broadcast-linux.install
 source=("$url/releases/download/v$pkgver/broadcast-linux-$pkgver-$CARCH.tar.gz")
 # Run updpkgsums after the GitHub release is published, before pushing to AUR.
-sha256sums=('eca31ccd8b44f2273092d22e6775ceb74d95c40caba85a60a94dc5908f21d8dc')
+sha256sums=('e2c7bf89b7293b7121b0e63920662838b1e85d237683bdd5299ba88e80a63dac')
 
 package() {
     cd "broadcast-linux-$pkgver-$CARCH"
