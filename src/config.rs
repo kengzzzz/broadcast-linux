@@ -41,8 +41,7 @@ impl AudioEffect {
         }
     }
 
-    /// Samples at 48 kHz that the output lags the input, measured on speech. A mic profile
-    /// adds 30 ms to Studio Voice.
+    /// Output lag in samples at 48 kHz, measured on speech.
     pub fn delay(self, profiled: bool) -> usize {
         match self {
             Self::StudioVoiceLowLatency if !profiled => 1920,
@@ -85,7 +84,7 @@ pub struct Stage {
     pub strength: f32,
 }
 
-/// The Studio Voice mic profiles Broadcast offers. Default turns the profile model off.
+/// `Default` loads no profile model.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MicProfile {
@@ -100,7 +99,7 @@ impl MicProfile {
     pub const ALL: [Self; 4] = [Self::Default, Self::Bright, Self::Full, Self::Warm];
 
     /// The model numbers its six profiles alphabetically: bright, colored, flat, full,
-    /// thin, warm. Broadcast shows three of them.
+    /// thin, warm. Broadcast offers three.
     pub fn id(self) -> Option<u32> {
         match self {
             Self::Default => None,
@@ -168,7 +167,6 @@ impl MicConfig {
         )
     }
 
-    /// The Studio Voice profile in use, if any.
     pub fn profile(&self) -> Option<u32> {
         self.studio_voice
             .enabled
@@ -337,8 +335,7 @@ pub enum SuperResolutionMode {
 }
 
 impl SuperResolutionMode {
-    /// `VideoSuperRes` levels Ultra and Medium. Its streaming levels drew halos around hair
-    /// on webcam frames.
+    /// `VideoSuperRes` levels Ultra and Medium. The streaming levels drew halos around hair.
     pub fn quality_level(self) -> u32 {
         match self {
             Self::Quality => 4,
@@ -347,7 +344,6 @@ impl SuperResolutionMode {
     }
 }
 
-/// Captures the webcam smaller and upscales the result to `width`x`height`.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SuperResolution {
@@ -383,7 +379,6 @@ impl FrameGenerationMode {
     }
 }
 
-/// Runs the webcam at `fps / multiplier` and makes the frames in between.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct FrameGeneration {
@@ -448,7 +443,6 @@ impl CameraConfig {
             || self.frame_generation.enabled
     }
 
-    /// Output frames made from each webcam frame.
     pub fn frame_multiplier(&self) -> u32 {
         if self.frame_generation.enabled {
             self.frame_generation.multiplier.max(1)
@@ -457,7 +451,6 @@ impl CameraConfig {
         }
     }
 
-    /// Frames the webcam is asked for each second.
     pub fn capture_fps(&self) -> u32 {
         self.fps / self.frame_multiplier()
     }
@@ -473,7 +466,7 @@ impl CameraConfig {
         Ok(())
     }
 
-    /// The checks that also apply to files, which keep their own frame rate.
+    /// All checks but the frame rate's, which files don't use.
     pub fn validate_effects(&self) -> Result<()> {
         let backgrounds = usize::from(self.background.is_some())
             + usize::from(self.background_blur.enabled)

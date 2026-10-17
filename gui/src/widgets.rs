@@ -43,8 +43,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     response
 }
 
-/// An effect with a switch on the right. `options`, when given, shows under it once the
-/// chevron or title opens the row, and is only editable while the effect is on.
+/// `options` shows under the row once it is opened, editable only while the effect is on.
 pub fn effect_row(
     ui: &mut Ui,
     id: &str,
@@ -136,7 +135,6 @@ fn paint_chevron(ui: &Ui, rect: Rect, open: bool, color: Color32) {
         .add(egui::Shape::line(points, Stroke::new(1.8, color)));
 }
 
-/// An accent-colored heading over a group of rows.
 pub fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(8.0);
     ui.label(
@@ -163,7 +161,7 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     inner
 }
 
-/// The left and right columns, or `None` when the content is too narrow for two.
+/// `None` when the content is too narrow for two columns.
 pub fn split(ui: &Ui) -> Option<(Rect, Rect)> {
     let area = ui.available_rect_before_wrap();
     if area.width() < TWO_COLUMNS {
@@ -175,7 +173,6 @@ pub fn split(ui: &Ui) -> Option<(Rect, Rect)> {
     Some((left, right))
 }
 
-/// A column scrolling on its own.
 pub fn pane(ui: &mut Ui, rect: Rect, id: &str, add: impl FnOnce(&mut Ui)) {
     ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
         egui::ScrollArea::vertical()
@@ -270,7 +267,7 @@ pub fn paint_icon(ui: &Ui, icon: Icon, center: Pos2, size: f32, color: Color32) 
     }
 }
 
-/// The most urgent of several status colors: bad, then warning, then good.
+/// The most urgent color: bad, then warning, then good.
 pub fn worst(colors: impl IntoIterator<Item = Color32>) -> Option<Color32> {
     let rank = |c: &Color32| match *c {
         theme::BAD => 3,

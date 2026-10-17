@@ -77,7 +77,7 @@ impl Terminal {
         terminal
     }
 
-    /// Ends a percentage line, so other output starts on a line of its own.
+    /// Ends the percentage line before other output.
     pub fn end_line(&self) {
         if self.last.take().is_some() && self.interactive {
             eprintln!();

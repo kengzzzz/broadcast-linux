@@ -38,8 +38,8 @@ impl fmt::Display for Generation {
 pub const NO_NGX: &str = "Super Resolution needs the NVIDIA driver's _nvngx.dll, which the \
      driver installs in nvidia/wine beside libGLX_nvidia.so.0, and this driver has none";
 
-/// Where the driver keeps the Windows `_nvngx.dll` it ships for Proton, found the way Proton
-/// does: beside `libGLX_nvidia.so.0`, in `nvidia/wine`.
+/// The driver's Windows `_nvngx.dll` for Proton, found like Proton does: in `nvidia/wine`
+/// beside `libGLX_nvidia.so.0`.
 pub fn ngx_dir() -> Option<PathBuf> {
     let listed = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]
         .iter()

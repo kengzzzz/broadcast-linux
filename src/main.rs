@@ -180,7 +180,7 @@ extern "C" fn interrupted(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Relaxed);
 }
 
-/// Names the file in each step, and stops at Ctrl+C, so the half-made files are removed.
+/// Names the file in each step, and cancels on Ctrl+C so temporary files get removed.
 struct FileProgress {
     terminal: Terminal,
     file: RefCell<String>,

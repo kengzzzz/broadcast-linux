@@ -373,7 +373,6 @@ impl Webcam {
         find(&self.formats, wanted, width, height)
     }
 
-    /// What Super Resolution would capture to make `width`x`height`.
     pub fn upscale_source(
         &self,
         wanted: InputFormat,
@@ -383,7 +382,7 @@ impl Webcam {
         upscale_source(&self.formats, wanted, width, height)
     }
 
-    /// Common sizes Super Resolution can make from this webcam, largest first.
+    /// Common sizes Super Resolution can upscale to, largest first.
     pub fn upscaled_sizes(&self, wanted: InputFormat) -> Vec<(u32, u32)> {
         COMMON_SIZES
             .into_iter()

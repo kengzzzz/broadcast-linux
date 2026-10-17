@@ -2,18 +2,18 @@
 
 ## Unreleased
 
-NVIDIA Broadcast 2.3.0, with its mic profiles, RTX Video Super Resolution, Frame Generation and File Processor.
+NVIDIA Broadcast 2.3.0: mic profiles, RTX Video Super Resolution and Frame Generation, and a File Processor.
 
-- Setup: uses NVIDIA Broadcast 2.3.0. Run `broadcast-linux setup` after upgrading. It downloads about 2.4 GB, asks you to accept NVIDIA's licence again and then removes the 2.2.1 files. Until then the service keeps using 2.2.1.
-- Camera: background blur is now done by broadcast-linux, because Broadcast 2.3.0 no longer ships NVIDIA's blur. It is tuned to match NVIDIA's look, and also works with the 2.2.1 files.
-- Camera: Eye Contact is about twice as fast in our tests (RTX 5080, 1080p).
-- Settings window: a new layout like NVIDIA Broadcast on Windows. Audio, Video and Settings pages, effects with switches and their options under each, and the camera preview beside the effects. Narrow windows show one column, and it follows the system's light or dark theme.
+- Setup: NVIDIA Broadcast 2.3.0. Run `broadcast-linux setup` after upgrading. It downloads about 2.4 GB, asks for NVIDIA's licence again and removes the 2.2.1 files, which the service uses until then.
+- Camera: our own background blur, since Broadcast 2.3.0 dropped NVIDIA's. It matches NVIDIA's look and also works with the 2.2.1 files.
+- Camera: Eye Contact is about twice as fast (RTX 5080, 1080p).
+- Settings window: a new layout like NVIDIA Broadcast on Windows, with Audio, Video, Files and Settings pages. Options open under each effect, the preview sits beside the camera effects, narrow windows get one column, and it follows the system theme.
 - Mic and speaker: the log names the apps reading them, for example `mic: 1 app(s) reading (vesktop)`.
-- Mic: Studio Voice mic profiles Bright, Full and Warm, as on Windows (`studio_voice.profile`). A profile adds about 30 ms of delay.
-- Camera: RTX Video Super Resolution (`super_resolution`). It captures the webcam at a smaller size and upscales it with AI. Needs an RTX 30 series or newer GPU.
-- Camera: RTX Video Frame Generation (`frame_generation`). It runs the webcam at a lower frame rate and makes the frames in between with AI, for example 60 fps from a 30 fps webcam. Needs an RTX 40 series or newer GPU.
-- New File Processor: runs the effects on video and audio files, on the settings window's new Files page or with `broadcast-linux process`. It needs ffmpeg, which the packages now suggest.
-- Settings window: a mic profile picker, and Super Resolution and Frame Generation rows that say why they are greyed out on GPUs without them.
+- Mic: Studio Voice mic profiles Bright, Full and Warm (`studio_voice.profile`). A profile adds about 30 ms of delay.
+- Camera: RTX Video Super Resolution (`super_resolution`) captures smaller and upscales with AI. Needs an RTX 30 series or newer.
+- Camera: RTX Video Frame Generation (`frame_generation`) makes the frames in between with AI, for example 60 fps from a 30 fps webcam. Needs an RTX 40 series or newer.
+- File Processor: the effects on video and audio files, on the Files page or with `broadcast-linux process`. Needs ffmpeg, now a suggested package.
+- Settings window: a mic profile picker, and Super Resolution and Frame Generation rows that say why they are unavailable.
 - `doctor`: new `rtx video` and `ffmpeg` items.
 
 ## 0.4.4 - 2026-10-12

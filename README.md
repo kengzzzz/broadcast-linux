@@ -22,8 +22,8 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 - Recommended CPU: Intel Core i5-8600 or AMD Ryzen 5 2600 or newer
 - Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
   or higher
-- RTX Video Super Resolution requires an RTX 30 series or newer GPU, and Frame Generation
-  an RTX 40 series or newer
+- RTX Video Super Resolution requires an RTX 30 series or newer, Frame Generation an RTX 40
+  series or newer
 
 Tested on an RTX 50 card. NVIDIA's installers for RTX 20 to 50 differ only in their
 AI model files and DLL signatures, so RTX 20, 30 and 40 cards should work too. Mic noise

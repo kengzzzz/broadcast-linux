@@ -191,10 +191,10 @@ static int point_ngx_at(const char *dir) {
     return (int)status;
 }
 
-/* Broadcast 2.3 dropped NVIDIA's BackgroundBlur effect, so the worker blurs the frame itself and
- * the usual composite puts the person back on top. Person pixels get almost no weight, so their
- * colors don't smear into the background around them. The Gaussian runs on a frame shrunk by
- * `scale`, in premultiplied floats, and the weight is divided out when growing it back. */
+/* Broadcast 2.3 dropped NVIDIA's BackgroundBlur, so blur here and composite the person back on
+ * top. Person pixels get almost no weight, so their colors don't smear into the background.
+ * The Gaussian runs on a frame shrunk by `scale` in premultiplied floats, and growing it back
+ * divides the weight out. */
 static const char blur_kernels[] =
     "#define AT(img, pitch, x, y) (*(float4 *)((char *)(img) + (y) * (pitch) + (x) * 16))\n"
     "extern \"C\" __global__ void shrink(const unsigned char *src, int src_pitch, const unsigned char *mask,\n"
@@ -334,7 +334,6 @@ static int blur_init(struct blur *b, float strength, unsigned width, unsigned he
     return image_alloc(&b->across, small_width, small_height, NVCV_RGBA, NVCV_F32, NVCV_CHUNKY, NVCV_GPU, 1);
 }
 
-/* Writes the frame blurred with the person weighted out to `dst`, an RGB frame like `src`. */
 static int blur_run(struct blur *b, NvCVImage *src, NvCVImage *mask, NvCVImage *dst, CUstream stream) {
     int width = (int)src->width, height = (int)src->height, small_width = (int)b->shrunk.width,
         small_height = (int)b->shrunk.height, one = 1, zero = 0;

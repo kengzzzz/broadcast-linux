@@ -607,7 +607,6 @@ pub struct Settings {
     /// The real device: "default" or a node name.
     pub target: String,
     pub stages: Vec<Stage>,
-    /// The Studio Voice mic profile number.
     pub profile: Option<u32>,
     pub unload_after: Duration,
     pub name: String,
@@ -1024,7 +1023,7 @@ impl AudioDevice {
         })
     }
 
-    /// The worker's arguments and the output reserve its effects need.
+    /// Also returns the output reserve the effects need.
     fn worker_args(&self, install: &Installation) -> Result<(Vec<String>, usize)> {
         let stages = &self.settings.stages;
         let args = worker_args(
@@ -1243,8 +1242,8 @@ fn playback_process(stream: &pw::stream::Stream, rt: &Rt) {
     *chunk.size_mut() = u32::try_from(n * 4).unwrap_or(0);
 }
 
-/// The audio worker's arguments for `stages`. `profile` only applies to Studio Voice.
-/// `keep_awake` is `None` for a file, which the worker reads whole as fast as it can.
+/// `profile` only applies to Studio Voice. `keep_awake` is `None` for files, which the
+/// worker reads whole, as fast as it can.
 pub fn worker_args(
     install: &Installation,
     stages: &[Stage],

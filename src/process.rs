@@ -1,5 +1,4 @@
-//! The File Processor: runs the effects over video and audio files. ffmpeg decodes and
-//! encodes, and the same workers as the live devices run the effects.
+//! The File Processor: ffmpeg decodes and encodes, and the live workers run the effects.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -24,7 +23,7 @@ use crate::worker::{Launch, Pipes, Worker};
 
 pub const UPSCALE_HEIGHTS: [u32; 3] = [1080, 1440, 2160];
 
-/// File types offered in file pickers; anything ffmpeg reads works.
+/// For file pickers. Anything ffmpeg reads works.
 pub const EXTENSIONS: [&str; 14] = [
     "mp4", "mov", "mkv", "webm", "m4v", "avi", "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus",
     "wma",
@@ -32,13 +31,12 @@ pub const EXTENSIONS: [&str; 14] = [
 
 const POLL: Duration = Duration::from_millis(100);
 
-/// The effects to run on files. Only the effect settings of `audio` and `video` count:
-/// devices, sizes and frame rates come from each file.
+/// Only the effect settings count. Sizes and frame rates come from each file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effects {
     pub audio: MicConfig,
     pub video: CameraConfig,
-    /// Super Resolution's output height. The width keeps the video's shape.
+    /// Super Resolution's output height. The width keeps the shape.
     pub upscale_height: u32,
 }
 
@@ -77,7 +75,6 @@ impl Effects {
         Ok(())
     }
 
-    /// Samples the audio worker's output lags its input.
     fn audio_delay(&self) -> usize {
         let profiled = self.audio.profile().is_some();
         self.audio
@@ -102,8 +99,7 @@ pub fn ffmpeg_missing() -> Option<&'static str> {
         .then_some("processing files needs ffmpeg; install it with your package manager")
 }
 
-/// Runs `effects` over `input` and returns the new file. It goes in `output_dir`, else
-/// beside `input`, named after it, and never replaces an existing file.
+/// Returns the new file, in `output_dir` or else beside `input`. It never replaces a file.
 pub fn process(
     paths: &Paths,
     input: &Path,
@@ -177,8 +173,7 @@ pub fn process(
     publish(&output, dir, &stem, container.ext())
 }
 
-/// Moves the finished file to the first free `STEM-broadcast[-N].EXT` in `dir`. Another job
-/// taking a name at the same moment can't be overwritten.
+/// Moves `output` to the first free `STEM-broadcast[-N].EXT`, also when other jobs race for it.
 fn publish(output: &Path, dir: &Path, stem: &str, ext: &str) -> Result<PathBuf> {
     for n in 1..10_000 {
         let name = dir.join(match n {
@@ -197,8 +192,8 @@ fn publish(output: &Path, dir: &Path, stem: &str, ext: &str) -> Result<PathBuf> 
     bail!("no free file name for the output in {}", dir.display())
 }
 
-/// Renames `from` to `to` unless `to` exists. Filesystems without `RENAME_NOREPLACE` get a
-/// plain rename, after the caller's check.
+/// Fails if `to` exists. Without `RENAME_NOREPLACE` support it does a plain rename, so the
+/// caller checks first.
 fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes());
@@ -234,8 +229,8 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
-    /// Runs the audio effects with one worker per channel. The worker's delay is cut from
-    /// the start, and silence fed after the end brings the last samples out.
+    /// One worker per channel. Its delay is cut from the start, and silence after the end
+    /// brings the last samples out.
     fn audio_pass(
         &self,
         audio: &AudioStream,
@@ -341,8 +336,6 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// Runs the camera effects: ffmpeg decodes to BGR at a constant frame rate, the worker
-    /// reads that and writes YUYV, and ffmpeg encodes it with the audio.
     fn video_pass(&self, video: &VideoStream, audio: Option<&Path>, output: &Path) -> Result<()> {
         self.progress.step("Running the video effects");
         let out = if self.effects.video.super_resolution.enabled {
@@ -381,8 +374,8 @@ impl Job<'_> {
         let statuses = wait_tools(&mut tools, &mut workers)?;
         let worker_failed = !statuses.workers[0].success();
         let failure = || log.worker_failure("camera");
-        // The worker fails too when the encoder stops reading, but then the encoder's
-        // error is the useful one.
+        // When the encoder stops reading, the worker fails too, but the encoder's error is
+        // the useful one.
         if worker_failed && !log.last().starts_with("Output pipe closed") {
             bail!(failure());
         }
@@ -397,8 +390,7 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// ffmpeg decoding the video to BGR at its shown size and a constant frame rate. Frames
-    /// are repeated from the file's start, so the video lines up with the audio.
+    /// Constant frame rate from the file's start, so the video lines up with the audio.
     fn video_decoder(&self, video: &VideoStream) -> Result<Tool> {
         let (width, height) = (video.width, video.height);
         let mut scale = format!("scale={width}:{height}:flags=bicubic");
@@ -469,8 +461,7 @@ impl Job<'_> {
         })
     }
 
-    /// ffmpeg encoding the worker's YUYV frames as H.264, with the processed audio in
-    /// `audio`, else the file's own.
+    /// Adds the processed `audio`, else the file's own.
     fn video_encoder(
         &self,
         video: &VideoStream,
@@ -509,8 +500,7 @@ impl Job<'_> {
         let mut filters = format!(
             "setparams=colorspace={matrix}:color_primaries={primaries}:color_trc={transfer}:range=tv"
         );
-        // The worker makes frames only between inputs, so the last one also gets the time
-        // of the frames that would follow it.
+        // Frames are only made between inputs, so the last one is held for M - 1 more.
         let multiplier = self.effects.video.frame_multiplier();
         if multiplier > 1 {
             let _ = write!(filters, ",tpad=stop_mode=clone:stop={}", multiplier - 1);
@@ -532,7 +522,6 @@ impl Job<'_> {
         Tool::spawn("ffmpeg (encoding video)", &mut encoder)
     }
 
-    /// Puts the processed audio beside the untouched video.
     fn remux(&self, audio: &Path, container: Container, output: &Path) -> Result<()> {
         self.progress.step("Saving the new audio with the video");
         let mut command = ffmpeg();
@@ -555,8 +544,7 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// Polls until `finished`, reporting `done` of `total` milliseconds. Fails with
-    /// `Cancelled` once the user cancels.
+    /// Polls until `finished`. `done` and `total` are milliseconds. Fails with `Cancelled`.
     fn wait(
         &self,
         mut finished: impl FnMut() -> bool,
@@ -576,8 +564,7 @@ impl Job<'_> {
     }
 }
 
-/// Splits interleaved samples into one stream per worker, then adds silence for the delay
-/// plus a frame, since the worker only returns whole frames.
+/// Ends with the delay plus a frame of silence, since workers only return whole frames.
 fn split(
     mut source: ChildStdout,
     mut inputs: Vec<ChildStdin>,
@@ -597,7 +584,7 @@ fn split(
                 lane[i * 4..i * 4 + 4].copy_from_slice(&chunk[at..at + 4]);
             }
         }
-        // A chunk at a time for each worker, so their outputs stay in step for `join`.
+        // A chunk per worker in turn, so their outputs stay in step for `join`.
         for (input, lane) in inputs.iter_mut().zip(&lanes) {
             input.write_all(&lane[..whole * 4])?;
         }
@@ -620,8 +607,7 @@ fn split(
     Ok(())
 }
 
-/// Interleaves the workers' frames again, minus the delay at the start and the silence at
-/// the end, into `sink`. Returns the samples written per channel.
+/// Drops the delay and the padding. Returns the samples written per channel.
 fn join(
     mut outputs: Vec<ChildStdout>,
     mut sink: ChildStdin,
@@ -656,8 +642,8 @@ fn join(
     Ok(written)
 }
 
-/// The part of the output frame starting at sample `position` that is the input's own
-/// audio: output sample `delay + i` comes from input sample `i`, of `length` once known.
+/// The input's part of the output frame at `position`. Output sample `delay + i` is input
+/// sample `i`, of `length` once known.
 fn kept(position: u64, delay: usize, length: Option<u64>) -> (usize, usize) {
     let frame_end = position + FRAME as u64;
     let start = (delay as u64).clamp(position, frame_end);
@@ -668,7 +654,7 @@ fn kept(position: u64, delay: usize, length: Option<u64>) -> (usize, usize) {
     (at(start), at(end))
 }
 
-/// Fills `buf` unless the input ends first, and returns how much it read.
+/// Returns less than `buf.len()` only at the end.
 fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -695,7 +681,6 @@ fn aac(audio: &AudioStream) -> Vec<String> {
         .to_vec()
 }
 
-/// An ffmpeg run whose last error line is kept.
 struct Tool {
     what: &'static str,
     child: Child,
@@ -740,7 +725,7 @@ impl Drop for Tool {
     }
 }
 
-/// Reads a child's stderr on its own thread, so a full pipe never stalls it.
+/// On its own thread, so a full stderr pipe never stalls the child.
 struct Log {
     last: Arc<Mutex<String>>,
     thread: JoinHandle<()>,
@@ -771,8 +756,7 @@ impl Log {
         Self { last, thread }
     }
 
-    /// The last line, once the process has exited and its output is read. A pipe some other
-    /// process kept open stops the wait after a second.
+    /// Waits up to a second for the reader to finish, in case another process holds the pipe.
     fn last(&self) -> String {
         let deadline = Instant::now() + Duration::from_secs(1);
         while !self.thread.is_finished() && Instant::now() < deadline {
@@ -808,8 +792,7 @@ fn tools_done(tools: &mut [Tool], workers: &mut [Worker]) -> bool {
             .all(|worker| matches!(worker.try_wait(), Ok(Some(_))))
 }
 
-/// Waits for every process. Once one has failed, the rest get a few seconds, since their
-/// pipes close.
+/// Gives every process 10 s to exit.
 fn wait_tools(tools: &mut [Tool], workers: &mut [Worker]) -> Result<Statuses> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -835,7 +818,6 @@ fn wait_tools(tools: &mut [Tool], workers: &mut [Worker]) -> Result<Statuses> {
     }
 }
 
-/// Removes the job's temporary files when it ends, whether it worked or not.
 struct Temp {
     base: PathBuf,
     files: Mutex<Vec<PathBuf>>,
@@ -877,8 +859,8 @@ enum Container {
 }
 
 impl Container {
-    /// Video effects make H.264 MP4. New audio keeps a video's container when it can hold
-    /// AAC. Audio files stay WAV or FLAC, and others become M4A.
+    /// Video effects make MP4. New audio keeps an MP4 or MOV, others become MKV. WAV and FLAC
+    /// stay, other audio becomes M4A.
     fn choose(input: &Path, has_video: bool, video_effects: bool) -> Self {
         let ext = input
             .extension()
@@ -941,7 +923,7 @@ enum Encoder {
 }
 
 impl Encoder {
-    /// The first that works, checked once per run that finds one.
+    /// The first that works. Only a success is cached.
     fn find() -> Result<Self> {
         static FOUND: Mutex<Option<Encoder>> = Mutex::new(None);
         let mut found = FOUND.lock().unwrap();
@@ -961,7 +943,7 @@ impl Encoder {
         }
     }
 
-    /// Whether this ffmpeg can encode with it: some builds list encoders that fail to start.
+    /// Some builds list encoders that fail to start.
     fn works(self) -> bool {
         ffmpeg()
             .args([
@@ -1047,8 +1029,8 @@ impl VideoStream {
         }
     }
 
-    /// The output's matrix, primaries and transfer tags. The worker only changes the matrix.
-    /// Tags `setparams` doesn't know by ffprobe's name fall back to the matrix's.
+    /// Matrix, primaries and transfer. The worker only changes the matrix. Names `setparams`
+    /// doesn't know fall back to the matrix's.
     fn output_colors(&self, bt601: bool) -> [&str; 3] {
         const PRIMARIES: [&str; 10] = [
             "bt709",
@@ -1207,8 +1189,7 @@ fn ratio(text: Option<&str>, separator: char) -> Option<(u32, u32)> {
     (num > 0 && den > 0).then_some((num, den))
 }
 
-/// Moves an average frame rate within 0.5% of a usual one onto it, so a phone's variable
-/// frame rate comes out at 30 rather than 30.09 fps.
+/// Snaps to a usual rate within 0.5%, so a phone's variable 30.09 fps becomes 30.
 fn snap_rate((num, den): (u32, u32)) -> (u32, u32) {
     const USUAL: [(u32, u32); 14] = [
         (24000, 1001),

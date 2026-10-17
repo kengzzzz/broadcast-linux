@@ -49,7 +49,7 @@ pub struct Checks {
     /// Why setup must run, if it must.
     pub setup_needed: Option<String>,
     pub report: Report,
-    /// Why each of these effects can't run with the installed files.
+    /// Effects the installed files can't run, with the reason.
     pub missing: Vec<(Feature, String)>,
 }
 
@@ -68,7 +68,7 @@ pub struct App {
     pub sinks: Vec<AudioNode>,
     pub default_source: Option<String>,
     pub webcams: Vec<Webcam>,
-    /// The virtual camera's label, or what to fix; `None` until the Video page checks it.
+    /// The virtual camera's label, or what to fix. `None` until the Video page checks.
     pub loopback: Option<Result<String, v4l2::Hint>>,
     task: Option<(String, Receiver<Result<String, String>>)>,
     pub message: Option<Message>,
@@ -310,7 +310,7 @@ impl App {
         self.checks.as_ref()?.setup_needed.as_deref()
     }
 
-    /// Why `feature` can't run, once the checks have looked.
+    /// Why `feature` can't run. `None` also until the checks finish.
     pub fn missing(&self, feature: Feature) -> Option<String> {
         let checks = self.checks.as_ref()?;
         let (_, reason) = checks.missing.iter().find(|(f, _)| *f == feature)?;

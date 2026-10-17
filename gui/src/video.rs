@@ -156,7 +156,7 @@ fn camera_effects(app: &mut App, ui: &mut egui::Ui) {
     rtx_video_effects(app, ui);
 }
 
-/// Rows for effects some GPUs' files lack, greyed out with the reason while they are off.
+/// Greyed out, with the reason, when the GPU's files lack the effect and it is off.
 fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
     let camera = &app.draft.camera;
     let (width, height, fps) = (camera.width, camera.height, camera.fps);
@@ -267,7 +267,7 @@ fn generation_options(
     ui.label(RichText::new(note).small().color(theme::MUTED));
 }
 
-/// The Virtual background row. Returns true when the user asked to pick an image.
+/// True when the user asked to pick an image.
 pub fn background_row(
     ui: &mut egui::Ui,
     id: &str,
@@ -296,7 +296,7 @@ pub fn background_row(
     pick
 }
 
-/// Returns true when the user asked to pick a background image.
+/// True when the user asked to pick an image.
 fn background_options(ui: &mut egui::Ui, draft: &mut CameraConfig, picking: bool) -> bool {
     let current = background_of(draft);
     let mut chosen = current;
@@ -362,7 +362,7 @@ fn loopback_setup(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Why the preview cannot open, if it cannot.
+/// Why the preview can't open, if it can't.
 fn preview_blocked(app: &App) -> Option<&'static str> {
     if !app.loopback.as_ref().is_some_and(Result::is_ok) {
         Some("Set up the virtual camera to see the preview.")
@@ -421,8 +421,8 @@ fn preview(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        // Starting one during a restart would hold the virtual camera at its old size; an
-        // open one survives reloads, and `apply` closes it before a restart.
+        // Opening during a restart would hold the camera at its old size. An open preview
+        // survives reloads, and `apply` closes it before a restart.
         ui.add_enabled_ui(blocked.is_none() && (on || app.busy().is_none()), |ui| {
             widgets::switch(ui, &mut on, "Preview");
             ui.label("Preview");
@@ -459,7 +459,6 @@ fn preview(app: &mut App, ui: &mut egui::Ui) {
     camera_advanced(ui, &mut app.draft.camera, webcam);
 }
 
-/// The capture size and frame rate, as a menu under the preview.
 fn size_menu(app: &mut App, ui: &mut egui::Ui) {
     let camera = &app.draft.camera;
     let sizes = app
@@ -594,8 +593,8 @@ fn camera_advanced(ui: &mut egui::Ui, draft: &mut CameraConfig, webcam: Option<&
         });
 }
 
-/// The format the service would capture `format` in, at the size it captures: smaller than
-/// the camera's when Super Resolution upscales.
+/// The format the service would capture in, at its capture size, which is smaller with
+/// Super Resolution.
 fn capture_format(
     webcam: &Webcam,
     format: InputFormat,

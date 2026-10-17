@@ -23,13 +23,12 @@ use crate::theme;
 use crate::video::{background_row, preset_name};
 use crate::widgets::{self, effect_row, section_title};
 
-/// The File Processor page. Its settings live only as long as the window.
+/// Unlike the other pages, nothing here is saved to the config.
 #[derive(Default)]
 pub struct Files {
     items: Arc<Mutex<Vec<Item>>>,
     effects: Effects,
     output_dir: Option<PathBuf>,
-    /// Why ffmpeg can't be used; checked whenever the page opens.
     ffmpeg_missing: Option<&'static str>,
     job: Option<Job>,
     picker: Option<(Pick, Receiver<Vec<PathBuf>>)>,
@@ -57,14 +56,13 @@ enum Pick {
     Background,
 }
 
-/// Processes the waiting files one at a time on its own thread.
 struct Job {
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for Job {
-    /// Stops the current file, so closing the window leaves no half-made file behind.
+    /// Cancels and waits, so closing the window leaves no half-made file.
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -73,7 +71,6 @@ impl Drop for Job {
     }
 }
 
-/// Reports one file's progress to its row.
 struct Report {
     items: Arc<Mutex<Vec<Item>>>,
     index: usize,
@@ -134,8 +131,8 @@ impl Files {
             .is_some_and(|job| job.cancel.load(Ordering::Relaxed))
     }
 
-    /// Adds files, and the media files directly in folders. Rows are only ever appended
-    /// while a job runs, since it refers to them by position.
+    /// Folders add the media files directly in them. Rows are only ever appended, since a
+    /// running job refers to them by index.
     fn add(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         let paths: Vec<PathBuf> = paths
             .into_iter()
@@ -282,7 +279,6 @@ impl Files {
     }
 }
 
-/// The media files directly in `dir`, by name.
 fn media_in(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .into_iter()
@@ -595,7 +591,7 @@ fn audio_effects(ui: &mut egui::Ui, audio: &mut MicConfig, profiles_missing: Opt
     );
 }
 
-/// Returns true when the user asked to pick a background image.
+/// True when the user asked to pick a background image.
 fn video_effects(ui: &mut egui::Ui, video: &mut CameraConfig, picking: bool) -> bool {
     section_title(ui, "Video effects");
     let pick = background_row(ui, "files-background", video, picking);
@@ -650,7 +646,7 @@ fn video_effects(ui: &mut egui::Ui, video: &mut CameraConfig, picking: bool) -> 
     pick
 }
 
-/// Rows for effects some GPUs' files lack, greyed out with the reason while they are off.
+/// Greyed out, with the reason, when the GPU's files lack the effect and it is off.
 fn rtx_effects(
     ui: &mut egui::Ui,
     effects: &mut Effects,

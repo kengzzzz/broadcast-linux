@@ -245,7 +245,7 @@ impl Loopback {
         Ok(())
     }
 
-    /// The frame rate readers see; v4l2loopback reports 30 until told otherwise.
+    /// v4l2loopback reports 30 fps until told otherwise.
     pub fn set_fps(&self, fps: u32) -> io::Result<()> {
         let mut parm = StreamParm {
             type_: BUF_TYPE_VIDEO_OUTPUT,

@@ -1,13 +1,12 @@
 use eframe::egui::{self, Color32, FontId, Stroke, TextStyle, Theme};
 
-/// The teal of the app icon.
 pub const ACCENT: Color32 = Color32::from_rgb(20, 184, 166);
 pub const GOOD: Color32 = Color32::from_rgb(70, 170, 90);
 pub const WARN: Color32 = Color32::from_rgb(220, 150, 40);
 pub const BAD: Color32 = Color32::from_rgb(215, 75, 65);
 pub const MUTED: Color32 = Color32::from_gray(140);
 
-/// The accent for text, darker on light backgrounds to stay readable.
+/// Darker on light backgrounds, for contrast.
 pub fn accent_text(ui: &egui::Ui) -> Color32 {
     if ui.visuals().dark_mode {
         ACCENT
@@ -16,7 +15,6 @@ pub fn accent_text(ui: &egui::Ui) -> Color32 {
     }
 }
 
-/// Background colors of the window's parts, which differ between light and dark.
 pub struct Surface {
     pub rail: Color32,
     pub header: Color32,

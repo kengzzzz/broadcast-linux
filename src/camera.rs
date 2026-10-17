@@ -117,7 +117,6 @@ struct Session {
     /// With mapped loopback buffers, the slot on screen (`Loopback::shown`) stays out of
     /// circulation until a newer frame is queued, so the feed and worker never write it.
     hold_shown: bool,
-    /// Paces frames copied into the loopback, when the slots aren't its own buffers.
     spread: Spread,
     live: bool,
 }
@@ -189,8 +188,8 @@ impl Recent {
     }
 }
 
-/// Shows the frames of each finished slot evenly over the time until the next one is
-/// expected. Frame Generation puts several frames in a slot; otherwise there is one.
+/// Spreads each slot's frames evenly until the next slot is due. Frame Generation puts
+/// several frames in a slot.
 struct Spread {
     frames: usize,
     /// The webcam's frame interval, until the worker's own is measured.
@@ -220,7 +219,7 @@ impl Spread {
         }
     }
 
-    /// Takes a finished slot and returns the one it replaces, with that one's arrival.
+    /// Returns the slot this one replaces, with its arrival.
     fn arrived(&mut self, slot: usize, at: Instant) -> Option<(usize, Instant)> {
         // The second slot was queued while the models loaded, so its gap isn't counted.
         if let Some(last) = self.last.replace(at)
@@ -240,7 +239,7 @@ impl Spread {
         replaced.map(|held| (held.slot, held.arrived))
     }
 
-    /// The newest frame due by `now`, as slot and index; frames already overdue are skipped.
+    /// The newest frame due by `now`, as (slot, index). Overdue frames are skipped.
     fn due(&mut self, now: Instant) -> Option<(usize, usize)> {
         let held = self.held.as_mut()?;
         let mut due = None;
@@ -251,7 +250,7 @@ impl Spread {
         due
     }
 
-    /// The held slot, once its last frame is shown, with its arrival.
+    /// The held slot and its arrival, once its last frame is shown.
     fn release(&mut self) -> Option<(usize, Instant)> {
         let held = self.held.take_if(|held| held.next >= self.frames)?;
         Some((held.slot, held.arrived))
@@ -826,16 +825,15 @@ impl CameraLoop {
         }
     }
 
-    /// Copies the frame due now into the loopback and hands back slots fully shown.
+    /// Also frees slots whose frames have all been shown.
     fn show_due(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
         if let Some((slot, frame)) = session.spread.due(Instant::now()) {
             let bytes = self.placeholder.len();
-            // SAFETY: the token gives this thread the slot until it is sent back. Sessions
-            // that copy frames give the loopback's buffers to neither the feed nor the
-            // worker, so nothing else writes them.
+            // SAFETY: the token gives this thread the slot until it is sent back. In copy mode
+            // neither the feed nor the worker gets the loopback's buffers.
             let _ = unsafe {
                 let output = session.frames.output(slot);
                 self.loopback.write_frame(&output[frame * bytes..][..bytes])
@@ -850,9 +848,8 @@ impl CameraLoop {
     }
 }
 
-/// The camera worker's arguments for the effects in `config`, on frames of `size` that
-/// Super Resolution upscales to `out_size`. `background` is the replacement image, already
-/// BGR24 at `size`.
+/// `out_size` is Super Resolution's output. `background` is the replacement image as BGR24
+/// at `size`.
 pub fn effect_args(
     config: &CameraConfig,
     install: &Installation,
@@ -907,7 +904,6 @@ pub fn effect_args(
     Ok(args)
 }
 
-/// Arguments for RTX Video Super Resolution and Frame Generation, which run last.
 fn rtx_video_args(
     config: &CameraConfig,
     install: &Installation,
@@ -1010,7 +1006,7 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
     Ok(cache)
 }
 
-/// The image at `source`, cropped to fill `width`x`height`, as BGR24.
+/// Cropped to fill `width`x`height`, as BGR24.
 pub fn background_bgr(source: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
     let read = || -> image::ImageResult<DynamicImage> {
         let mut decoder = ImageReader::open(source)?
