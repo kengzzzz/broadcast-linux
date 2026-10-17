@@ -163,6 +163,23 @@ static void use_blocking_sync(void) {
             fprintf(stderr, "Could not set blocking sync on GPU %d; the worker will spin while waiting\n", d);
 }
 
+/* Logs the GPU of the current CUDA context, the one the effects use. */
+static void log_gpu(void) {
+    typedef int (WINAPI *device_fn)(int *);
+    typedef int (WINAPI *text_fn)(char *, int, int);
+    HMODULE cuda = GetModuleHandleA("nvcuda.dll");
+    if (!cuda)
+        return;
+    RESOLVE(device_fn, get_device, cuda, "cuCtxGetDevice");
+    RESOLVE(text_fn, get_name, cuda, "cuDeviceGetName");
+    RESOLVE(text_fn, get_bus, cuda, "cuDeviceGetPCIBusId");
+    int device;
+    char name[256], bus[32];
+    if (get_device && get_name && get_bus && !get_device(&device) && !get_name(name, sizeof name, device) &&
+        !get_bus(bus, sizeof bus, device))
+        fprintf(stderr, "Running on %s at PCI %s\n", name, bus);
+}
+
 /* Page-locks shared frame memory so uploads and downloads skip CUDA's staging copy. */
 static int pin_host(void *pixels, size_t bytes, int pin) {
     typedef int (WINAPI *register_fn)(void *, size_t, unsigned);
@@ -887,6 +904,7 @@ int main(int argc, char **argv) {
     }
     const NvCVImage *fg = relight ? &relit : &src_rgb;
     const NvCVImage *bg = background_path || remove_background ? &bg_gpu : blur.module ? &blurred : &src_rgb;
+    log_gpu();
     fprintf(stderr, "Camera effects ready (%s%s%s%s%s%s%s%s%s); reading %ux%u %s frames, writing %ux%u YUYV\n",
             denoise ? "noise removal " : "", gaze ? "Eye Contact " : "", faces ? "Auto Frame " : "",
             background_path ? "background " : "",

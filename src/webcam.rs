@@ -537,7 +537,14 @@ fn find(
     })
 }
 
-fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32), fps: u32) {
+/// Returns the driver's frame interval, if it reports one.
+fn set_fps(
+    file: &File,
+    input: &str,
+    format: Format,
+    (width, height): (u32, u32),
+    fps: u32,
+) -> Option<Duration> {
     let mut parm = StreamParm {
         type_: BUF_TYPE_VIDEO_CAPTURE,
         parm: [0; 50],
@@ -546,13 +553,15 @@ fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32)
     parm.parm[3] = fps;
     if let Err(e) = ioctl(file, v4l2::VIDIOC_S_PARM, &mut parm) {
         eprintln!("camera: {input} did not accept {fps} fps: {e}");
-        return;
+        return None;
     }
     if parm.parm[0] & CAP_TIMEPERFRAME == 0 {
-        return;
+        return None;
     }
+    let interval = (parm.parm[2] > 0 && parm.parm[3] > 0)
+        .then(|| Duration::from_secs(u64::from(parm.parm[2])) / parm.parm[3]);
     let Some((actual, slow)) = other_fps(parm.parm[2], parm.parm[3], fps) else {
-        return;
+        return interval;
     };
     let hint = if !slow {
         ""
@@ -567,6 +576,7 @@ fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32)
         "camera: {input} gives {actual} fps as {} at {width}x{height}, not {fps}{hint}",
         format.label()
     );
+    interval
 }
 
 /// The driver's rate as text when it is over 2% off `wanted`, and whether it is under 90%.
@@ -599,6 +609,7 @@ pub struct Capture {
     buffers: Vec<Mapping>,
     color: Color,
     captured: Option<Instant>,
+    interval: Option<Duration>,
 }
 
 // SAFETY: the mappings belong to this Capture alone and are only touched through &mut self.
@@ -657,7 +668,7 @@ impl Capture {
             );
         }
 
-        set_fps(&file, input, format, (width, height), fps);
+        let interval = set_fps(&file, input, format, (width, height), fps);
 
         let mut request = RequestBuffers {
             count: BUFFERS,
@@ -673,6 +684,7 @@ impl Capture {
             buffers: Vec::new(),
             color: Color::reported(&pix),
             captured: None,
+            interval,
         };
         for index in 0..request.count {
             let mut buf = Buffer::mmap(index);
@@ -701,6 +713,10 @@ impl Capture {
         let mut kind = BUF_TYPE_VIDEO_CAPTURE;
         ioctl(&capture.file, VIDIOC_STREAMON, &mut kind).map_err(|e| busy_or(input, &e))?;
         Ok(capture)
+    }
+
+    pub fn interval(&self) -> Option<Duration> {
+        self.interval
     }
 
     pub fn reported_color(&self) -> Color {

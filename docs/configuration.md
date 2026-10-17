@@ -36,6 +36,7 @@ Restart instead when changing these fields:
 
 - `[mic]` or `[speaker]`: `enabled`, `name`
 - `[camera]`: `enabled`, `device`, `width`, `height`
+- `[service]`: `gpu`
 
 ```sh
 systemctl --user restart broadcast-linux
@@ -101,6 +102,24 @@ It needs an RTX 40 series or newer.
 
 Both run after the other effects. `broadcast-linux doctor` (`rtx video`) says whether
 they can run.
+
+## GPU load
+
+A bar at the bottom of the window shows the effects' time per frame against the time
+between frames, for example 27 of 33 ms (81%). Over 100%, the camera drops frames or the
+audio falls behind. The camera's frame rate is shown against the one set. It is lower when
+the webcam can't deliver it. "Whole GPU" is how busy the GPU was, including games and the
+desktop. Light loads run at a lower clock, so they read higher.
+
+## Several GPUs
+
+With more than one NVIDIA GPU, **Settings** has a **Run effects on** list. Automatic
+uses the first supported GPU in `nvidia-smi -L`. In the config, `[service] gpu` takes a
+UUID from that list. All effects run on the chosen GPU.
+
+Setup installs NVIDIA's files for one GPU generation. After picking a GPU of another
+generation, click **Apply**, then **Download and install**. If the configured GPU is
+missing, the effects use the automatic one and `doctor` warns.
 
 ## File Processor
 

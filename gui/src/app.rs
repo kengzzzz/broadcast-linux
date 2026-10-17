@@ -7,17 +7,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 use broadcast_linux::config::{self, Config};
 use broadcast_linux::doctor::{self, Report};
+use broadcast_linux::gpu::{self, Chosen, Gpu};
 use broadcast_linux::graph::AudioNode;
 use broadcast_linux::nvidia::{Feature, Installation};
 use broadcast_linux::paths::Paths;
 use broadcast_linux::status::{Device, State, Status};
 use broadcast_linux::webcam::{self, Webcam};
-use broadcast_linux::{VERSION, gpu, setup, v4l2};
+use broadcast_linux::{VERSION, setup, v4l2};
 use eframe::egui;
 
 use crate::config_file::{ChangedOnDisk, ConfigFile};
 use crate::devices;
 use crate::files::Files;
+use crate::gpu_bar::WholeGpu;
 use crate::preview::Preview;
 use crate::service::{self, Link};
 use crate::setup_task::{Outcome, SetupTask};
@@ -45,7 +47,11 @@ pub struct Message {
 
 /// Gathered off the UI thread.
 pub struct Checks {
-    pub gpu: Result<String, String>,
+    /// From the saved config, not the draft.
+    pub gpu: Result<Chosen, String>,
+    pub gpus: Vec<Gpu>,
+    /// Generation of the installed NVIDIA files.
+    pub installed_for: Option<String>,
     /// Why setup must run, if it must.
     pub setup_needed: Option<String>,
     pub report: Report,
@@ -65,6 +71,8 @@ pub struct App {
     pub service: Arc<ServiceState>,
     pub checks: Option<Checks>,
     checks_task: Option<Receiver<Checks>>,
+    /// Requested while a check ran, which may have read an older config.
+    recheck: bool,
     pub sources: Vec<AudioNode>,
     pub sinks: Vec<AudioNode>,
     pub default_source: Option<String>,
@@ -81,6 +89,7 @@ pub struct App {
     /// Saved, but the service has not taken it yet; `true` when that needs a restart.
     unapplied: Option<bool>,
     pub files: Files,
+    pub whole_gpu: WholeGpu,
 }
 
 /// Refreshed every few seconds on a background thread.
@@ -143,9 +152,10 @@ impl App {
                 }
             }
         });
+        let link = Link::start(ctx.clone());
         let mut app = Self {
             page: Page::Audio,
-            link: Link::start(ctx.clone()),
+            link: link.clone(),
             config_seen: modified(&paths),
             paths,
             file,
@@ -154,6 +164,7 @@ impl App {
             service,
             checks: None,
             checks_task: None,
+            recheck: false,
             sources: Vec::new(),
             sinks: Vec::new(),
             default_source: None,
@@ -168,6 +179,7 @@ impl App {
             picker: None,
             unapplied: None,
             files: Files::default(),
+            whole_gpu: WholeGpu::start(ctx.clone(), link.clone()),
         };
         app.run_checks(ctx);
         app.refresh_devices();
@@ -271,13 +283,20 @@ impl App {
 
     pub fn run_checks(&mut self, ctx: &egui::Context) {
         if self.checks_task.is_some() {
+            self.recheck = true;
             return;
         }
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let paths = Paths::new().expect("HOME is set");
         thread::spawn(move || {
-            let gpu = gpu::detect().map_err(|e| format!("{e:#}"));
+            let gpus = gpu::list().map_err(|e| format!("{e:#}"));
+            let wanted = Config::load(&paths.config)
+                .ok()
+                .and_then(|config| config.service.gpu);
+            let gpu = gpus.as_ref().map_err(Clone::clone).and_then(|gpus| {
+                gpu::choose(gpus, wanted.as_deref()).map_err(|e| format!("{e:#}"))
+            });
             let setup_needed = match &gpu {
                 Ok(gpu) => setup::needed(&paths, gpu.generation),
                 Err(e) => Some(e.clone()),
@@ -300,7 +319,9 @@ impl App {
                     .collect()
             });
             let checks = Checks {
-                gpu: gpu.map(|g| format!("{} ({})", g.name, g.generation)),
+                gpu,
+                gpus: gpus.unwrap_or_default(),
+                installed_for: install.as_ref().and_then(Installation::generation),
                 setup_needed,
                 report: doctor::check(&paths),
                 missing,
@@ -318,6 +339,12 @@ impl App {
 
     pub fn setup_needed(&self) -> Option<&str> {
         self.checks.as_ref()?.setup_needed.as_deref()
+    }
+
+    pub fn gpu_fallback(&self) -> bool {
+        self.checks
+            .as_ref()
+            .is_some_and(|checks| checks.gpu.as_ref().is_ok_and(|gpu| gpu.fallback.is_some()))
     }
 
     /// The older release in use, when setup only has to update NVIDIA's files.
@@ -365,6 +392,8 @@ impl App {
         let camera_in_use = self
             .device(Endpoint::Camera)
             .is_some_and(|camera| camera.readers > 0);
+        let gpu_changed =
+            self.saved().map(|saved| &saved.service.gpu) != Some(&self.draft.service.gpu);
         let Ok(file) = &mut self.file else {
             return;
         };
@@ -378,6 +407,9 @@ impl App {
         }
         self.config_seen = modified(&self.paths);
         self.changed_on_disk = false;
+        if gpu_changed {
+            self.run_checks(ctx);
+        }
         if !self.service.active() {
             self.unapplied = None;
             self.note("Saved. The service is not running, so nothing changed yet.");
@@ -517,6 +549,9 @@ impl App {
                 self.page = Page::Settings;
             }
             self.checks = Some(checks);
+            if std::mem::take(&mut self.recheck) {
+                self.run_checks(ctx);
+            }
         }
         if let Some(rx) = &self.picker
             && let Ok(picked) = rx.try_recv()

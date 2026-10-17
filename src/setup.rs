@@ -65,15 +65,23 @@ pub trait Ui: Progress {
 const UNPACKED_SPACE: u64 = 5 << 30;
 
 pub fn run(paths: &Paths, opts: &Options, ui: &dyn Ui) -> Result<()> {
-    let gpu = gpu::detect()?;
+    let chosen = gpu::detect_configured(paths)?;
     let installer = INSTALLERS
         .iter()
-        .find(|i| i.generation == gpu.generation)
-        .with_context(|| format!("no NVIDIA Broadcast installer known for {}", gpu.generation))?;
-    ui.step(&format!("GPU: {} ({})", gpu.name, gpu.generation));
+        .find(|i| i.generation == chosen.generation)
+        .with_context(|| {
+            format!(
+                "no NVIDIA Broadcast installer known for {}",
+                chosen.generation
+            )
+        })?;
+    if let Some(fallback) = &chosen.fallback {
+        ui.step(&format!("Note: {fallback}"));
+    }
+    ui.step(&format!("GPU: {} ({})", chosen.gpu.name, chosen.generation));
 
     let out = paths.nvidia().join(installer.build);
-    match files_problem(paths, gpu.generation) {
+    match files_problem(paths, chosen.generation) {
         None => ui.step(&format!(
             "NVIDIA Broadcast {} files already installed",
             installer.build
@@ -92,7 +100,7 @@ pub fn run(paths: &Paths, opts: &Options, ui: &dyn Ui) -> Result<()> {
                 accept_eula(&exe, &out, ui)?;
             }
             extract(&exe, &out, ui)?;
-            fs::write(out.join(".complete"), format!("{}\n", gpu.generation))?;
+            fs::write(out.join(".complete"), format!("{}\n", chosen.generation))?;
             if !opts.keep_installer {
                 fs::remove_file(&exe)?;
             }

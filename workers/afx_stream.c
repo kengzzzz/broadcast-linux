@@ -84,6 +84,23 @@ struct keepawake {
     void *stream;
 };
 
+/* Logs the GPU of the current CUDA context, the one the effects use. */
+static void log_gpu(void) {
+    typedef int (WINAPI *device_fn)(int *);
+    typedef int (WINAPI *text_fn)(char *, int, int);
+    HMODULE cuda = GetModuleHandleA("nvcuda.dll");
+    if (!cuda)
+        return;
+    device_fn get_device = (device_fn)GetProcAddress(cuda, "cuCtxGetDevice");
+    text_fn get_name = (text_fn)GetProcAddress(cuda, "cuDeviceGetName");
+    text_fn get_bus = (text_fn)GetProcAddress(cuda, "cuDeviceGetPCIBusId");
+    int device;
+    char name[256], bus[32];
+    if (get_device && get_name && get_bus && !get_device(&device) && !get_name(name, sizeof name, device) &&
+        !get_bus(bus, sizeof bus, device))
+        fprintf(stderr, "Running on %s at PCI %s\n", name, bus);
+}
+
 /* Runs after the effects load, so the context NVIDIA's runtime made current is reused. */
 static int keepawake_start(struct keepawake *k) {
     typedef int (WINAPI *get_ctx_fn)(void **);
@@ -212,6 +229,7 @@ int main(int argc, char **argv) {
         keepawake.memset_async = NULL;
         fprintf(stderr, "Could not start the GPU keep-awake; runs may be slow while the GPU idles\n");
     }
+    log_gpu();
     fprintf(stderr, "%s ready; %u samples per frame at 48 kHz mono f32\n", names, frame);
 
     LARGE_INTEGER freq, t0, t1;

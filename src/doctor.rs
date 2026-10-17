@@ -150,7 +150,7 @@ pub fn check(paths: &Paths) -> Report {
         })
     };
 
-    report("gpu", gpu_check());
+    report("gpu", gpu_check(paths));
     report("wine", wine());
     report("nvidia files", nvidia(paths));
     report("wine prefix", prefix(paths));
@@ -224,17 +224,26 @@ fn output(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-fn gpu_check() -> Check {
-    let gpu = gpu::detect()?;
+fn gpu_check(paths: &Paths) -> Check {
+    let chosen = gpu::detect_configured(paths)?;
     let driver = output(
         "nvidia-smi",
         &["--query-gpu=driver_version", "--format=csv,noheader"],
     )?;
     let driver = driver.lines().next().unwrap_or_default();
-    Ok(format!(
+    let detail = format!(
         "{} ({}), driver {driver}",
-        gpu.name, gpu.generation
-    ))
+        chosen.gpu.name, chosen.generation
+    );
+    match chosen.fallback {
+        Some(fallback) => Err(Problem::warn(
+            format!(
+                "{detail}\n{fallback}. Pick another GPU in Settings, or remove gpu from [service] in the config."
+            ),
+            &[],
+        )),
+        None => Ok(detail),
+    }
 }
 
 fn wine() -> Check {
@@ -257,7 +266,7 @@ fn wine_major(version: &str) -> Option<u32> {
 }
 
 fn nvidia(paths: &Paths) -> Check {
-    if let Some(problem) = setup::files_problem(paths, gpu::detect()?.generation) {
+    if let Some(problem) = setup::files_problem(paths, gpu::detect_configured(paths)?.generation) {
         return Err(Problem::fail(problem));
     }
     let install = Installation::find(paths)?;

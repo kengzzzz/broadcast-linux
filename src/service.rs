@@ -12,6 +12,7 @@ use pw::loop_::Signal;
 use crate::audio::{AudioDevice, Kind, Settings};
 use crate::camera::{self, Camera};
 use crate::config::{self, Config};
+use crate::gpu;
 use crate::paths::Paths;
 use crate::status;
 
@@ -43,6 +44,9 @@ pub enum Event {
 
 pub type EventSender = pw::channel::Sender<Event>;
 
+/// How often status goes out while only loads change.
+const LOAD_TICK: Duration = Duration::from_secs(1);
+
 struct State {
     paths: Paths,
     config: Config,
@@ -53,6 +57,8 @@ struct State {
     reload_error: Option<String>,
     speaker_error: Option<String>,
     camera_error: Option<String>,
+    /// From the config the service started with, since a change needs a restart.
+    gpu: gpu::Lazy,
     audio: Vec<AudioDevice>,
     camera: Option<Camera>,
     events: EventSender,
@@ -84,9 +90,10 @@ pub fn run() -> Result<()> {
     let _int = signal(Signal::INT, || Event::Quit);
 
     let server = start_status(&events)?;
-    let (audio, speaker_error) = start_audio(&config, &core, &events)?;
+    let gpu = gpu::Lazy::new(config.service.gpu.clone());
+    let (audio, speaker_error) = start_audio(&config, &gpu, &core, &events)?;
     let (camera, camera_error) = if config.camera.enabled {
-        start_camera(&config, &events)?
+        start_camera(&config, gpu.clone(), &events)?
     } else {
         (None, None)
     };
@@ -103,7 +110,7 @@ pub fn run() -> Result<()> {
     );
     notify_ready();
 
-    let state = RefCell::new(State {
+    let state = Rc::new(RefCell::new(State {
         paths,
         started: config.clone(),
         config,
@@ -112,21 +119,36 @@ pub fn run() -> Result<()> {
         reload_error: None,
         speaker_error,
         camera_error,
+        gpu,
         audio,
         camera,
         events: events.clone(),
         mainloop: mainloop.clone(),
-    });
+    }));
     state.borrow_mut().publish();
-    let attached = receiver.attach(mainloop.loop_(), move |event| {
-        let mut state = state.borrow_mut();
-        state.handle(event);
-        state.publish();
+    let attached = receiver.attach(mainloop.loop_(), {
+        let state = Rc::clone(&state);
+        move |event| {
+            let mut state = state.borrow_mut();
+            state.handle(event);
+            state.publish();
+        }
     });
+    // Loads change without an event. Audio and camera threads must not send one: the channel
+    // stays locked while a slow client is written to, which would stall them.
+    let ticker = mainloop.loop_().add_timer({
+        let state = Rc::clone(&state);
+        move |_| state.borrow_mut().publish()
+    });
+    ticker
+        .update_timer(Some(LOAD_TICK), Some(LOAD_TICK))
+        .into_result()?;
     mainloop.run();
     // Dropping the state joins the camera thread. The channel stays locked while the
     // callback runs, so joining there would deadlock with a camera status notification.
+    drop(ticker);
     drop(attached);
+    drop(state);
     Ok(())
 }
 
@@ -186,17 +208,18 @@ fn watch_links(
 /// The mic is required; a speaker failure is returned instead.
 fn start_audio(
     config: &Config,
+    gpu: &gpu::Lazy,
     core: &pw::core::CoreRc,
     events: &EventSender,
 ) -> Result<(Vec<AudioDevice>, Option<String>)> {
     let mut audio = Vec::new();
     let mut speaker_error = None;
     if config.mic.enabled {
-        let settings = Settings::mic(config);
+        let settings = Settings::mic(config, gpu);
         audio.push(AudioDevice::new(Kind::Mic, core, settings, events.clone())?);
     }
     if config.speaker.enabled {
-        let settings = Settings::speaker(config);
+        let settings = Settings::speaker(config, gpu);
         match AudioDevice::new(Kind::Speaker, core, settings, events.clone()) {
             Ok(speaker) => audio.push(speaker),
             Err(e) => {
@@ -226,14 +249,18 @@ fn start_status(events: &EventSender) -> Result<Option<status::Server>> {
 }
 
 /// A camera failure is returned, not fatal.
-fn start_camera(config: &Config, events: &EventSender) -> Result<(Option<Camera>, Option<String>)> {
+fn start_camera(
+    config: &Config,
+    gpu: gpu::Lazy,
+    events: &EventSender,
+) -> Result<(Option<Camera>, Option<String>)> {
     let idle = Duration::from_secs(config.service.idle_timeout_seconds);
     let events = Mutex::new(events.clone());
     let notify = Box::new(move || {
         let _ = events.lock().unwrap().send(Event::StatusChanged);
     });
     Ok(
-        match Camera::start(Paths::new()?, config.camera.clone(), idle, notify) {
+        match Camera::start(Paths::new()?, config.camera.clone(), idle, gpu, notify) {
             Ok(camera) => (Some(camera), None),
             Err(e) => {
                 eprintln!("camera: disabled: {e:#}");
@@ -396,8 +423,8 @@ impl State {
         eprintln!("reload: {}", self.paths.config.display());
         for d in &mut self.audio {
             let settings = match d.kind() {
-                Kind::Mic => Settings::mic(&config),
-                Kind::Speaker => Settings::speaker(&config),
+                Kind::Mic => Settings::mic(&config, &self.gpu),
+                Kind::Speaker => Settings::speaker(&config, &self.gpu),
             };
             if d.set_settings(settings) {
                 d.stop();
@@ -447,6 +474,11 @@ impl State {
             reloads: self.reloads,
             reload_error: self.reload_error.clone(),
             restart_pending: config::needs_restart(started, &self.config),
+            gpu: self.gpu.found().map(|chosen| status::Gpu {
+                uuid: chosen.gpu.uuid.clone(),
+                name: chosen.gpu.name.clone(),
+                fallback: chosen.fallback.clone(),
+            }),
             mic: audio(Kind::Mic, started.mic.enabled, &None),
             speaker: audio(Kind::Speaker, started.speaker.enabled, &self.speaker_error),
             camera,

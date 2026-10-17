@@ -83,3 +83,6 @@ idle_timeout_seconds = 5
 # Keep the GPU awake while a mic or speaker model is loaded, for fewer short gaps.
 # false saves some GPU power.
 gpu_keep_awake = true
+# GPU UUID from `nvidia-smi -L`. Omit for the first supported GPU.
+# A GPU of another generation needs `broadcast-linux setup` again.
+# gpu = "GPU-01234567-89ab-cdef-0123-456789abcdef"

@@ -16,6 +16,9 @@ NVIDIA Broadcast 2.3.0: mic profiles, RTX Video Super Resolution and Frame Gener
 - Settings window: a mic profile picker, and Super Resolution and Frame Generation rows that say why they are unavailable.
 - `doctor`: new `rtx video` and `ffmpeg` items.
 - Camera: a new size no longer stops the camera while an app uses it. The app gets a black picture until it closes the camera, then the new size applies.
+- Settings window: a GPU load bar, like NVIDIA Broadcast's. It shows the effects' time per frame against the time between frames, the camera's frame rate and whole-GPU use.
+- Several GPUs: pick the GPU for the effects in Settings (`[service] gpu`). All effects run on one GPU, also in Automatic, which takes the first supported one. A GTX card listed first no longer stops setup.
+- Mic, speaker and camera: the log names the GPU each worker runs on.
 
 ## 0.4.4 - 2026-10-12
 

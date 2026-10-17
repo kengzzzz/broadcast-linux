@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{AudioEffect, LightPreset};
+use crate::gpu::{Chosen, Generation};
 use crate::paths::Paths;
 
 pub const BACKGROUND_MODELS: &str = "nvbcast_vfx_gs_v0_9";
@@ -100,6 +101,27 @@ impl Installation {
                 crate::setup::BUILD
             )
         })
+    }
+
+    /// Why the video effects can't run on `gpu`: their engines are per generation. Unknown
+    /// markers don't block.
+    pub fn wrong_generation(&self, gpu: &Chosen) -> Option<String> {
+        let installed = self.generation()?;
+        let known = Generation::ALL
+            .into_iter()
+            .find(|generation| generation.to_string() == installed)?;
+        (known != gpu.generation).then(|| {
+            format!(
+                "NVIDIA's files are for {installed}, but the effects run on {} ({}); run `broadcast-linux setup`",
+                gpu.gpu.name, gpu.generation
+            )
+        })
+    }
+
+    /// From the `.complete` marker setup writes.
+    pub fn generation(&self) -> Option<String> {
+        let complete = fs::read_to_string(self.build.join(".complete")).ok()?;
+        Some(complete.trim().to_owned())
     }
 
     /// The build in use, if older than the pinned one.
@@ -280,6 +302,47 @@ mod tests {
         assert_eq!(pinned.older_build(), None);
         assert!(!pinned.needs_setup(Feature::SuperResolution));
         assert!(pinned.missing(Feature::SuperResolution).is_some());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn blocks_video_only_for_a_known_other_generation() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-generation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let install = Installation {
+            runtime: dir.join("runtime"),
+            models: dir.join("models"),
+            studio_light: dir.join("light"),
+            build: dir.clone(),
+        };
+        let chosen = crate::gpu::Chosen {
+            gpu: crate::gpu::Gpu {
+                uuid: "GPU-1".into(),
+                name: "NVIDIA GeForce RTX 5080".into(),
+                pci_bus: "00000000:01:00.0".into(),
+                compute_capability: "12.0".into(),
+                generation: Some(Generation::Blackwell),
+            },
+            generation: Generation::Blackwell,
+            fallback: None,
+            others: false,
+        };
+        assert_eq!(install.wrong_generation(&chosen), None, "no marker");
+        for (marker, blocks) in [
+            ("Blackwell\n", false),
+            ("Ada\n", true),
+            ("\n", false),
+            ("x", false),
+        ] {
+            fs::write(dir.join(".complete"), marker).unwrap();
+            assert_eq!(
+                install.wrong_generation(&chosen).is_some(),
+                blocks,
+                "{marker:?}"
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

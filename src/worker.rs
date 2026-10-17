@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::gpu::Chosen;
 use crate::paths;
 
 pub struct Launch {
@@ -16,6 +17,8 @@ pub struct Launch {
     pub cwd: PathBuf,
     pub args: Vec<String>,
     pub stdin: Option<Stdio>,
+    /// `None` leaves the choice to CUDA and DXVK.
+    pub gpu: Option<Chosen>,
 }
 
 pub struct Pipes {
@@ -42,6 +45,9 @@ impl Worker {
         let dll_path = format!("{}:{}", workers.display(), paths::relay_dir().display());
         let mut child = Command::new("wine");
         child.envs(session_display());
+        if let Some(gpu) = &launch.gpu {
+            child.envs(gpu.pin());
+        }
         let mut child = child
             .arg(&program)
             .args(&launch.args)

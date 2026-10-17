@@ -15,6 +15,7 @@ pub mod gpu;
 pub mod graph;
 pub mod mjpeg;
 pub mod nvidia;
+pub mod nvml;
 pub mod paths;
 pub mod prefix;
 pub mod process;

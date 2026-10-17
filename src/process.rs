@@ -17,6 +17,7 @@ use crate::audio::{self, FRAME, RATE};
 use crate::camera::{self, expand_home};
 use crate::config::{CameraConfig, MicConfig};
 use crate::frames;
+use crate::gpu::{self, Chosen};
 use crate::nvidia::Installation;
 use crate::paths::Paths;
 use crate::progress::Progress;
@@ -137,9 +138,19 @@ pub fn process(
         || "output".into(),
         |s| shortened(&s.to_string_lossy()).to_owned(),
     );
+    let install = Installation::find(paths)?;
+    let gpu = gpu::detect_configured(paths).ok();
+    if let Some(problem) = gpu
+        .as_ref()
+        .filter(|_| video.is_some())
+        .and_then(|gpu| install.wrong_generation(gpu))
+    {
+        bail!(problem);
+    }
     let job = Job {
         paths,
-        install: Installation::find(paths)?,
+        install,
+        gpu,
         input,
         media: &media,
         effects,
@@ -232,6 +243,7 @@ fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
 struct Job<'a> {
     paths: &'a Paths,
     install: Installation,
+    gpu: Option<Chosen>,
     input: &'a Path,
     media: &'a Media,
     effects: &'a Effects,
@@ -292,6 +304,7 @@ impl Job<'_> {
                 cwd: self.install.runtime.clone(),
                 args: args.clone(),
                 stdin: None,
+                gpu: self.gpu.clone(),
             })?;
             workers.push(worker);
             inputs.push(pipes.stdin.context("no input pipe to the audio worker")?);
@@ -485,6 +498,7 @@ impl Job<'_> {
             cwd: self.install.runtime.clone(),
             args,
             stdin: Some(Stdio::from(frames)),
+            gpu: self.gpu.clone(),
         })?;
         Ok((worker, pipes, background))
     }

@@ -135,6 +135,7 @@ fn measure(args: &Args, paths: &Paths, install: &Installation, new: bool) -> Res
         cwd: install.runtime.clone(),
         args: worker_args(args, install, &decoder, &frames)?,
         stdin: Some(Stdio::from(tokens_in)),
+        gpu: broadcast_linux::gpu::detect_configured(paths).ok(),
     })?;
     let (ready_tx, ready_rx) = mpsc::channel();
     thread::spawn(move || {

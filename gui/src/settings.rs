@@ -1,4 +1,5 @@
 use broadcast_linux::doctor::Status as Check;
+use broadcast_linux::gpu::{Chosen, Generation, Gpu};
 use broadcast_linux::{VERSION, setup};
 use eframe::egui::{self, RichText};
 
@@ -106,9 +107,14 @@ fn nvidia_files(app: &mut App, ui: &mut egui::Ui) {
                 });
             }
             Some(checks) => {
-                if let Ok(gpu) = &checks.gpu {
-                    ui.label(format!("GPU: {gpu}"));
+                if let Ok(chosen) = &checks.gpu {
+                    let (chosen, gpus) = (chosen.clone(), checks.gpus.clone());
+                    let installed = checks.installed_for.clone();
+                    gpu_choice(app, ui, &chosen, &gpus, installed.as_deref());
                 }
+                let Some(checks) = &app.checks else {
+                    return;
+                };
                 match &checks.setup_needed {
                     Some(reason) => {
                         match app.update_from() {
@@ -144,6 +150,73 @@ fn nvidia_files(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     });
+}
+
+fn gpu_choice(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    chosen: &Chosen,
+    gpus: &[Gpu],
+    installed: Option<&str>,
+) {
+    if gpus.len() < 2 && app.draft.service.gpu.is_none() {
+        ui.label(format!("GPU: {} ({})", chosen.gpu.name, chosen.generation));
+        return;
+    }
+    let label = |gpu: &Gpu| {
+        let Some(generation) = gpu.generation else {
+            return format!("{} · not supported · {}", gpu.name, gpu.short_bus());
+        };
+        let mut text = format!("{} · {generation} · {}", gpu.name, gpu.short_bus());
+        if installed.is_some_and(|installed| installed != generation.to_string()) {
+            text.push_str(&download_note(generation));
+        }
+        text
+    };
+    let automatic = gpus
+        .iter()
+        .find(|gpu| gpu.generation.is_some())
+        .map_or_else(
+            || "Automatic".to_owned(),
+            |gpu| format!("Automatic ({})", gpu.name),
+        );
+    let selected = match &app.draft.service.gpu {
+        None => automatic.clone(),
+        Some(uuid) => gpus
+            .iter()
+            .find(|gpu| gpu.uuid.eq_ignore_ascii_case(uuid))
+            .map_or_else(|| format!("{uuid} (not present)"), label),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Run effects on");
+        egui::ComboBox::from_id_salt("gpu")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.draft.service.gpu, None, automatic);
+                for gpu in gpus {
+                    ui.add_enabled_ui(gpu.generation.is_some(), |ui| {
+                        ui.selectable_value(
+                            &mut app.draft.service.gpu,
+                            Some(gpu.uuid.clone()),
+                            label(gpu),
+                        );
+                    });
+                }
+            });
+    });
+    if let Some(fallback) = &chosen.fallback {
+        ui.colored_label(theme::WARN, format!("{fallback}."));
+    }
+}
+
+fn download_note(generation: Generation) -> String {
+    setup::INSTALLERS
+        .iter()
+        .find(|installer| installer.generation == generation)
+        .map_or_else(String::new, |installer| {
+            let tenths = (installer.size + 50_000_000) / 100_000_000;
+            format!(" · needs a {}.{} GB download", tenths / 10, tenths % 10)
+        })
 }
 
 fn service(app: &mut App, ui: &mut egui::Ui) {

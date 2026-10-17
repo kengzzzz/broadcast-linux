@@ -529,6 +529,8 @@ impl Default for CameraConfig {
 pub struct ServiceConfig {
     pub idle_timeout_seconds: u64,
     pub gpu_keep_awake: bool,
+    /// `None` picks the first supported GPU.
+    pub gpu: Option<String>,
 }
 
 impl Default for ServiceConfig {
@@ -536,6 +538,7 @@ impl Default for ServiceConfig {
         Self {
             idle_timeout_seconds: 5,
             gpu_keep_awake: true,
+            gpu: None,
         }
     }
 }
@@ -573,6 +576,7 @@ pub fn needs_restart(old: &Config, new: &Config) -> bool {
         || old.speaker.name != new.speaker.name
         || old.camera.device != new.camera.device
         || (old.camera.width, old.camera.height) != (new.camera.width, new.camera.height)
+        || old.service.gpu != new.service.gpu
 }
 
 #[cfg(test)]
@@ -738,6 +742,9 @@ mod tests {
         assert!(needs_restart(&old, &new));
         let mut new = old.clone();
         new.speaker.enabled = true;
+        assert!(needs_restart(&old, &new));
+        let mut new = old.clone();
+        new.service.gpu = Some("GPU-1".into());
         assert!(needs_restart(&old, &new));
     }
 

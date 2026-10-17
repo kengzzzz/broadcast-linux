@@ -14,6 +14,7 @@ use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 
 use crate::config::{AudioEffect, Config, Stage};
+use crate::gpu::Lazy;
 use crate::graph;
 use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
@@ -47,6 +48,9 @@ const SLOW_RESERVE: usize = RATE as usize / 100;
 const FAST_TRIPS: u64 = 250;
 const FAST_TRIP: Duration = Duration::from_millis(2);
 const SLOW_TRIP: Duration = Duration::from_millis(3);
+const LOAD_WINDOW: Duration = Duration::from_secs(1);
+/// Older means frames stopped coming back.
+const LOAD_STALE: Duration = Duration::from_millis(2500);
 /// Studio Voice takes up to about 12 ms on every other frame (RTX 5080).
 const STUDIO_VOICE_RESERVE: usize = 3 * PERIOD;
 /// A mic profile makes those frames take up to about 19 ms.
@@ -611,10 +615,11 @@ pub struct Settings {
     pub unload_after: Duration,
     pub name: String,
     pub keep_awake: bool,
+    pub gpu: Lazy,
 }
 
 impl Settings {
-    pub fn mic(config: &Config) -> Self {
+    pub fn mic(config: &Config, gpu: &Lazy) -> Self {
         let mic = &config.mic;
         Self {
             target: mic.input.clone(),
@@ -623,10 +628,11 @@ impl Settings {
             unload_after: Duration::from_secs(mic.unload_after_minutes * 60),
             name: mic.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
+            gpu: gpu.clone(),
         }
     }
 
-    pub fn speaker(config: &Config) -> Self {
+    pub fn speaker(config: &Config, gpu: &Lazy) -> Self {
         let speaker = &config.speaker;
         Self {
             target: speaker.output.clone(),
@@ -635,6 +641,7 @@ impl Settings {
             unload_after: Duration::from_secs(speaker.unload_after_minutes * 60),
             name: speaker.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
+            gpu: gpu.clone(),
         }
     }
 }
@@ -675,6 +682,8 @@ struct Shared {
     active: AtomicBool,
     sent: AtomicU64,
     received: AtomicU64,
+    /// When measured, and the mean processing time per frame in µs.
+    load: Mutex<Option<(Instant, u32)>>,
     /// Usually the reason when a worker fails to start.
     last_line: Mutex<String>,
 }
@@ -775,10 +784,22 @@ impl AudioDevice {
             Some(s) if !s.ready => State::Loading,
             Some(_) => State::Running,
         };
+        let load = self
+            .session
+            .as_ref()
+            .filter(|s| state == State::Running && s.worker.is_some())
+            .and_then(|s| *s.shared.load.lock().unwrap())
+            .filter(|(at, _)| at.elapsed() < LOAD_STALE)
+            .map(|(_, busy_us)| status::Load {
+                busy_us,
+                budget_us: u32::try_from(FRAME * 1_000_000 / RATE as usize).unwrap_or(u32::MAX),
+                ..status::Load::default()
+            });
         status::Device {
             state,
             readers: self.readers.len(),
             error: self.last_error.clone(),
+            load,
         }
     }
 
@@ -976,6 +997,7 @@ impl AudioDevice {
             cwd: install.runtime.clone(),
             args,
             stdin: None,
+            gpu: self.settings.gpu.get(),
         })?;
         let stdin = pipes.stdin.context("worker stdin")?;
 
@@ -1398,6 +1420,8 @@ fn drain_worker(
     // Bytes at the front of `buf` left over from a read that split a sample.
     let mut carry = 0;
     let mut frame = Frame::EMPTY;
+    let (mut busy, mut runs, mut measured) = (Duration::ZERO, 0u32, Instant::now());
+    let mut last_done: Option<Instant> = None;
     'read: loop {
         let n = match stdout.read(&mut buf[carry..]) {
             Ok(0) | Err(_) => break,
@@ -1412,11 +1436,22 @@ fn drain_worker(
                     break 'read;
                 };
                 frame.index = index;
-                let trip = sent.elapsed();
+                let done = Instant::now();
+                let trip = done - sent;
                 if trip > SLOW_TRIP {
                     rt.fast_trips.store(0, Ordering::Relaxed);
                 } else if trip <= FAST_TRIP {
                     rt.fast_trips.fetch_add(1, Ordering::Relaxed);
+                }
+                // A frame queued behind another starts when that one ends, as in `Pace`.
+                busy +=
+                    done.saturating_duration_since(last_done.map_or(sent, |last| sent.max(last)));
+                last_done = Some(done);
+                runs += 1;
+                if measured.elapsed() >= LOAD_WINDOW {
+                    let mean = u32::try_from((busy / runs).as_micros()).unwrap_or(u32::MAX);
+                    *shared.load.lock().unwrap() = Some((Instant::now(), mean));
+                    (busy, runs, measured) = (Duration::ZERO, 0, Instant::now());
                 }
                 if ring.try_push(frame).is_err() {
                     rt.stats.dropped_frames.fetch_add(1, Ordering::Relaxed);

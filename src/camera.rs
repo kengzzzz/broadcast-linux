@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{CameraConfig, InputColor};
 use crate::frames::{Decoder, SharedFrames};
-use crate::gpu;
+use crate::gpu::{self, Lazy};
 use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::status::{self, State};
@@ -28,6 +28,7 @@ use crate::worker::{self, Launch, Worker};
 /// Placeholder rate while no effect is running; enough to keep the device listed.
 const PLACEHOLDER_INTERVAL: Duration = Duration::from_millis(200);
 const SESSION_POLL: Duration = Duration::from_millis(20);
+const LOAD_WINDOW: Duration = Duration::from_secs(1);
 
 pub enum Control {
     Reload {
@@ -52,6 +53,7 @@ impl Camera {
         paths: Paths,
         config: CameraConfig,
         idle_timeout: Duration,
+        gpu: Lazy,
         notify: Notify,
     ) -> Result<Self> {
         let (commands, receiver) = mpsc::channel();
@@ -82,6 +84,7 @@ impl Camera {
                 ..
             } = waiting;
             let mut camera = CameraLoop::new(paths, config, idle_timeout, loopback, receiver);
+            camera.gpu = gpu;
             camera.status = shared;
             camera.notify = notify;
             camera.set_fps();
@@ -159,7 +162,7 @@ impl Waiting<'_> {
         } else {
             eprintln!("camera: disabled: {error:#}");
             let error = Some(format!("{error:#}"));
-            set_status(self.status, self.notify, State::Unavailable, 0, error);
+            set_status(self.status, self.notify, State::Unavailable, 0, error, None);
         }
         None
     }
@@ -208,6 +211,7 @@ impl Waiting<'_> {
                 Some(format!(
                     "an app is using it at {width} × {height}. It switches to {w} × {h} once the app closes the camera."
                 )),
+                None,
             );
             // SAFETY: as above.
             let _ = unsafe { loopback.write_frame(&frame) };
@@ -232,16 +236,22 @@ fn set_status(
     state: State,
     readers: usize,
     error: Option<String>,
+    load: Option<status::Load>,
 ) {
     let device = status::Device {
         state,
         readers,
         error,
+        load,
     };
     let mut status = status.lock().unwrap();
-    if *status != device {
-        *status = device;
-        drop(status);
+    // Loads go out with the service's tick. Notifying for them would block this thread on the
+    // service's event channel every second.
+    let changed = (status.state, status.readers, &status.error)
+        != (device.state, device.readers, &device.error);
+    *status = device;
+    drop(status);
+    if changed {
         notify();
     }
 }
@@ -255,7 +265,7 @@ fn placeholder(width: u32, height: u32) -> Vec<u8> {
 /// before it is joined.
 struct Session {
     tokens: File,
-    _worker: Option<Worker>,
+    worker: Option<Worker>,
     _feed: Feed,
     frames: Arc<SharedFrames>,
     free: Sender<Freed>,
@@ -264,6 +274,13 @@ struct Session {
     hold_shown: bool,
     spread: Spread,
     live: bool,
+    meter: Arc<Mutex<Meter>>,
+    /// The webcam's frame interval.
+    budget: Duration,
+    /// Frames written to the loopback since `measured`.
+    shown: u32,
+    measured: Instant,
+    load: Option<status::Load>,
 }
 
 struct Freed {
@@ -292,14 +309,14 @@ impl Pace {
         self.decodes.push(decode);
     }
 
-    pub fn done(&mut self, at: Instant) {
-        let Some(sent) = self.sent.pop_front() else {
-            return;
-        };
+    /// Returns the run it counted.
+    pub fn done(&mut self, at: Instant) -> Option<Duration> {
+        let sent = self.sent.pop_front()?;
         // The first run also loads the models, so it isn't counted.
-        if let Some(last) = self.last_done.replace(at) {
-            self.runs.push(at.saturating_duration_since(sent.max(last)));
-        }
+        let last = self.last_done.replace(at)?;
+        let run = at.saturating_duration_since(sent.max(last));
+        self.runs.push(run);
+        Some(run)
     }
 
     /// When to start decoding the next frame; `None` for right away.
@@ -413,6 +430,13 @@ impl Held {
     }
 }
 
+/// Runs since the camera loop last took them.
+#[derive(Default)]
+struct Meter {
+    busy: Duration,
+    runs: u32,
+}
+
 struct Feed {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -426,6 +450,7 @@ impl Feed {
         free: Receiver<Freed>,
         mut tokens: PipeWriter,
         to_worker: bool,
+        meter: Arc<Mutex<Meter>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -441,8 +466,10 @@ impl Feed {
                     });
                     match free.recv_timeout(wait) {
                         Ok(freed) => {
-                            if let Some(done) = freed.done {
-                                pace.done(done);
+                            if let Some(run) = freed.done.and_then(|done| pace.done(done)) {
+                                let mut meter = meter.lock().unwrap();
+                                meter.busy += run;
+                                meter.runs += 1;
                             }
                             slots.push_back(freed.slot);
                         }
@@ -522,6 +549,7 @@ struct CameraLoop {
     worker_line: Arc<Mutex<String>>,
     status: Arc<Mutex<status::Device>>,
     notify: Notify,
+    gpu: Lazy,
 }
 
 impl CameraLoop {
@@ -551,6 +579,7 @@ impl CameraLoop {
             worker_line: Arc::default(),
             status: Arc::default(),
             notify: Box::new(|| {}),
+            gpu: Lazy::default(),
         }
     }
 
@@ -596,6 +625,7 @@ impl CameraLoop {
             self.pump_frames();
             self.show_due();
             self.check_timers();
+            self.measure();
             self.publish();
         }
         self.stop();
@@ -613,7 +643,37 @@ impl CameraLoop {
             state,
             usize::from(self.in_use),
             self.error.clone(),
+            self.session.as_ref().and_then(|s| s.load),
         );
+    }
+
+    fn measure(&mut self) {
+        let Some(session) = self.session.as_mut().filter(|s| s.live) else {
+            return;
+        };
+        let elapsed = session.measured.elapsed();
+        if elapsed < LOAD_WINDOW {
+            return;
+        }
+        let Meter { busy, runs } = std::mem::take(&mut *session.meter.lock().unwrap());
+        let shown = std::mem::take(&mut session.shown);
+        session.measured = Instant::now();
+        let micros = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+        // No finished run: keep the last time, and fps shows the stall.
+        let busy_us = if runs > 0 {
+            Some(micros(busy / runs))
+        } else {
+            session.load.map(|load| load.busy_us)
+        };
+        session.load = busy_us
+            .filter(|_| session.worker.is_some())
+            .map(|busy_us| status::Load {
+                busy_us,
+                budget_us: micros(session.budget),
+                fps_x10: u32::try_from(u128::from(shown) * 10_000_000 / elapsed.as_micros().max(1))
+                    .unwrap_or(u32::MAX),
+                target_fps_x10: self.config.fps.saturating_mul(10),
+            });
     }
 
     fn fail(&mut self, message: String) {
@@ -757,6 +817,9 @@ impl CameraLoop {
         let fps = self.config.capture_fps();
         let format = webcam::choose(input, self.config.input_format, width, height)?;
         let mut capture = Capture::open(input, format, width, height, fps)?;
+        let budget = capture
+            .interval()
+            .unwrap_or(Duration::from_secs(1) / fps.max(1));
         let color = Color::resolve(format, self.config.input_color, capture.reported_color());
         eprintln!(
             "camera: capturing {input} at {width}x{height} {fps} fps as {}, {color}",
@@ -816,6 +879,7 @@ impl CameraLoop {
                 done: None,
             });
         }
+        let meter = Arc::default();
         let feed = Feed::start(
             capture,
             decoder,
@@ -823,16 +887,22 @@ impl CameraLoop {
             free_slots,
             tokens_out,
             effects,
+            Arc::clone(&meter),
         );
         Ok(Session {
             tokens,
-            _worker: worker,
+            worker,
             _feed: feed,
             frames,
             free,
             hold_shown,
             spread: Spread::new(multiplier, Duration::from_secs(1) / fps.max(1)),
             live: false,
+            meter,
+            budget,
+            shown: 0,
+            measured: Instant::now(),
+            load: None,
         })
     }
 
@@ -844,6 +914,10 @@ impl CameraLoop {
         size: (u32, u32),
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
+        let gpu = self.gpu.get();
+        if let Some(problem) = gpu.as_ref().and_then(|gpu| install.wrong_generation(gpu)) {
+            bail!(problem);
+        }
         let background = self
             .config
             .background
@@ -881,6 +955,7 @@ impl CameraLoop {
             cwd: install.runtime,
             args,
             stdin: Some(tokens),
+            gpu,
         })?;
         let last = Arc::clone(&self.worker_line);
         last.lock().unwrap().clear();
@@ -936,12 +1011,14 @@ impl CameraLoop {
                     }
                     if !session.live {
                         session.live = true;
+                        session.measured = now;
                         self.failures = 0;
                         self.error = None;
                         eprintln!("camera: effect running");
                     }
                     if let Some(shown) = held {
                         let freed = if self.loopback.queue(newest).is_ok() {
+                            session.shown += 1;
                             shown
                         } else {
                             newest
@@ -974,10 +1051,13 @@ impl CameraLoop {
             let bytes = self.placeholder.len();
             // SAFETY: the token gives this thread the slot until it is sent back. In copy mode
             // neither the feed nor the worker gets the loopback's buffers.
-            let _ = unsafe {
+            let written = unsafe {
                 let output = session.frames.output(slot);
                 self.loopback.write_frame(&output[frame * bytes..][..bytes])
             };
+            if written.is_ok() {
+                session.shown += 1;
+            }
         }
         if let Some((slot, done)) = session.spread.release() {
             let _ = session.free.send(Freed {

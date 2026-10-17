@@ -3,6 +3,7 @@ mod audio;
 mod config_file;
 mod devices;
 mod files;
+mod gpu_bar;
 mod pages;
 mod preview;
 mod service;

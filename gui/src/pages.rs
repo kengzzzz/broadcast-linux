@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use crate::app::{App, Endpoint, Page, release};
 use crate::setup_task::SetupTask;
 use crate::widgets::{self, Icon};
-use crate::{audio, files, settings, theme, video};
+use crate::{audio, files, gpu_bar, settings, theme, video};
 
 const RAIL_WIDTH: f32 = 78.0;
 
@@ -15,6 +15,7 @@ pub fn draw(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     rail(app, ui);
     header(app, ui);
+    gpu_bar::draw(app, ui);
     action_bar(app, ui);
     egui::CentralPanel::default()
         .frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(20, 12)))
@@ -70,13 +71,16 @@ fn rail(app: &mut App, ui: &mut egui::Ui) {
                     ),
                     Page::Video => app.device(Endpoint::Camera).map(|d| state_color(&d)),
                     Page::Files => app.files.running().then_some(theme::GOOD),
-                    Page::Settings => app.setup_needed().map(|_| {
-                        if app.update_from().is_some() {
-                            theme::WARN
-                        } else {
-                            theme::BAD
-                        }
-                    }),
+                    Page::Settings => app
+                        .setup_needed()
+                        .map(|_| {
+                            if app.update_from().is_some() {
+                                theme::WARN
+                            } else {
+                                theme::BAD
+                            }
+                        })
+                        .or_else(|| app.gpu_fallback().then_some(theme::WARN)),
                 };
                 if rail_item(ui, icon, label, app.page == page, status).clicked() {
                     let ctx = ui.ctx().clone();
