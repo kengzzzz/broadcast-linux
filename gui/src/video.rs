@@ -234,8 +234,7 @@ fn rtx_video_effects(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// The largest size in `sizes` with the shape of `size`, else the largest, when `size` isn't
-/// one of them.
+/// `None` when `size` is in `sizes`, else the largest of its shape, else the largest.
 fn native_size(sizes: &[(u32, u32)], (width, height): (u32, u32)) -> Option<(u32, u32)> {
     if sizes.contains(&(width, height)) {
         return None;

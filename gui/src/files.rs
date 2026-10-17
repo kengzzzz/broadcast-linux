@@ -521,7 +521,7 @@ fn process_bar(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Waits for xdg-open on its own thread, so it leaves no zombie.
+/// Waits on its own thread, so xdg-open leaves no zombie.
 fn show_folder(dir: PathBuf) {
     thread::spawn(move || {
         if let Ok(mut child) = Command::new("xdg-open").arg(dir).spawn() {

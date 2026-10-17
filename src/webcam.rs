@@ -569,8 +569,8 @@ fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32)
     );
 }
 
-/// The frame rate the driver set, as text, when it is more than 2% off `wanted`, and whether
-/// it is under 90%. Frame Generation's low rates are often rounded, for example 6 to 7.5.
+/// The driver's rate as text when it is over 2% off `wanted`, and whether it is under 90%.
+/// Webcams round low rates, for example 6 to 7.5.
 fn other_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<(String, bool)> {
     let (num, den, wanted) = (
         u64::from(numerator),

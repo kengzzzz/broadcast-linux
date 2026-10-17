@@ -156,7 +156,7 @@ impl Drop for SharedFrames {
     }
 }
 
-/// A file in memory. Workers open it by its `/proc/PID/fd/N` path.
+/// Workers open it by its `/proc/PID/fd/N` path.
 pub fn memfd(name: &CStr) -> io::Result<OwnedFd> {
     // SAFETY: plain syscall with a NUL-terminated name.
     let raw = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };

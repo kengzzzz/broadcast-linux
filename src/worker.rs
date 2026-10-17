@@ -99,8 +99,7 @@ fn session_display() -> Vec<(String, String)> {
     vars
 }
 
-/// Unlike `BufRead::lines`, a line that isn't UTF-8 doesn't end the reading, so the pipe never
-/// fills up and stalls the worker.
+/// Unlike `BufRead::lines`, reads past non-UTF-8 lines, so a full pipe never stalls the worker.
 pub fn log_lines(stderr: impl Read) -> impl Iterator<Item = String> {
     let mut reader = BufReader::new(stderr);
     let mut bytes = Vec::new();

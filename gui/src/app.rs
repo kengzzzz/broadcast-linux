@@ -558,7 +558,7 @@ pub fn device_summary(device: &Device) -> (egui::Color32, String) {
 
 pub const IMAGE_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
 
-/// Portal file filters are case-sensitive, and cameras name files like `IMG_1234.JPG`.
+/// Portal file filters are case-sensitive.
 pub fn any_case(extensions: &[&str]) -> Vec<String> {
     extensions
         .iter()

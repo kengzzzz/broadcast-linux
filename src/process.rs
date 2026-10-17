@@ -437,7 +437,7 @@ impl Job<'_> {
         )
     }
 
-    /// Also returns the background image, which must stay open until the worker has read it.
+    /// The returned file must stay open until the worker has read it.
     fn camera_worker(
         &self,
         video: &VideoStream,
@@ -446,8 +446,8 @@ impl Job<'_> {
     ) -> Result<(Worker, Pipes, Option<File>)> {
         let config = &self.effects.video;
         let (width, height) = (video.width, video.height);
-        // Wine hands arguments to workers in the Windows code page, so a path beside a file in
-        // ~/Vidéos wouldn't reach them. A /proc path is plain ASCII.
+        // Wine passes arguments in the Windows code page, which breaks non-ASCII paths. A /proc
+        // path is ASCII.
         let background = match &config.background {
             Some(image) => {
                 let bgr = camera::background_bgr(&expand_home(image), width, height)?;
