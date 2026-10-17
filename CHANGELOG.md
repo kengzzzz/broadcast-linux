@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-10-17
 
 NVIDIA Broadcast 2.3.0: mic profiles, RTX Video Super Resolution and Frame Generation, and a File Processor.
 
