@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr::NonNull;
@@ -99,11 +100,7 @@ impl SharedFrames {
 
     pub fn path(&self) -> Option<String> {
         let (fd, _) = self.memfd.as_ref()?;
-        Some(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            fd.as_raw_fd()
-        ))
+        Some(proc_path(fd))
     }
 
     fn len(&self) -> usize {
@@ -159,14 +156,23 @@ impl Drop for SharedFrames {
     }
 }
 
-fn map_memfd(len: usize) -> Result<(OwnedFd, NonNull<u8>)> {
+/// Workers open it by its `/proc/PID/fd/N` path.
+pub fn memfd(name: &CStr) -> io::Result<OwnedFd> {
     // SAFETY: plain syscall with a NUL-terminated name.
-    let raw = unsafe { libc::memfd_create(c"broadcast-linux-frames".as_ptr(), libc::MFD_CLOEXEC) };
+    let raw = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if raw < 0 {
-        bail!("creating shared frames: {}", io::Error::last_os_error());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: memfd_create returned a new descriptor that nothing else owns.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+pub fn proc_path(fd: &impl AsRawFd) -> String {
+    format!("/proc/{}/fd/{}", std::process::id(), fd.as_raw_fd())
+}
+
+fn map_memfd(len: usize) -> Result<(OwnedFd, NonNull<u8>)> {
+    let fd = memfd(c"broadcast-linux-frames").context("creating shared frames")?;
     // SAFETY: plain syscall on the descriptor owned above.
     if unsafe { libc::ftruncate(fd.as_raw_fd(), libc::off_t::try_from(len)?) } < 0 {
         bail!("sizing shared frames: {}", io::Error::last_os_error());

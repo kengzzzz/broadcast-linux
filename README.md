@@ -3,12 +3,13 @@
 NVIDIA Broadcast effects on Linux, with a native settings window and virtual mic,
 speaker and camera. Effects run through Wine and start when an app uses them.
 
-![Settings window: microphone and camera effects, then the setup checks](docs/demo.gif)
+![Settings window: mic and camera effects with the GPU load bar, then the system check](docs/demo.gif)
 
-- **Microphone:** noise removal, room echo removal, Studio Voice
+- **Microphone:** noise removal, room echo removal, Studio Voice with mic profiles
 - **Speaker:** noise and room echo removal for incoming call audio
 - **Camera:** video noise removal, background replacement/blur/removal, Studio Light,
-  Eye Contact, Auto Frame
+  Eye Contact, Auto Frame, RTX Video Super Resolution and Frame Generation
+- **File Processor:** the same effects on video and audio files
 
 ## Requirements
 
@@ -21,6 +22,8 @@ speaker and camera. Effects run through Wine and start when an app uses them.
 - Recommended CPU: Intel Core i5-8600 or AMD Ryzen 5 2600 or newer
 - Studio Voice and Studio Light (Virtual Key Light) require a GeForce RTX 3060 desktop GPU
   or higher
+- RTX Video Super Resolution requires an RTX 30 series or newer, Frame Generation an RTX 40
+  series or newer
 
 Tested on an RTX 50 card. NVIDIA's installers for RTX 20 to 50 differ only in their
 AI model files and DLL signatures, so RTX 20, 30 and 40 cards should work too. Mic noise
@@ -40,7 +43,8 @@ below NVIDIA's requirements. Its camera effects weren't tried. Reports are welco
 - The virtual camera requires v4l2loopback >= 0.12.6 and your user in the `video` group
 
 Optional: `rtkit` avoids short mic and speaker gaps while the CPU is fully busy. Most
-desktops already have it. If you install it, log out and back in.
+desktops already have it. If you install it, log out and back in. The File Processor
+needs `ffmpeg` (`ffmpeg-free` on Fedora).
 
 ## Install
 
@@ -96,15 +100,15 @@ sudo usermod -aG video "$USER"
 ## Get started
 
 1. Open **broadcast-linux** from your app menu, or run `broadcast-linux-gui`.
-2. On **Setup**, click **Download and install** and accept NVIDIA's licence.
+2. On **Settings**, click **Download and install** and accept NVIDIA's licence.
    The download is about 2.2 to 2.4 GB depending on your GPU. Start the service on the same page.
 3. Choose your devices and effects, then **Apply**. For the camera, follow the
-   **Camera** page's module and permission steps. Log in again after joining the video group.
+   **Video** page's module and permission steps. Log in again after joining the video group.
 4. In your call or recording app, select **NVIDIA Broadcast Mic** and **Broadcast Camera**.
    Enable the speaker if needed and select **NVIDIA Broadcast Speaker** as the app's output.
 
 Mic noise removal is on by default. Speaker processing and camera effects are off.
-The **Setup** page includes diagnostics and service logs.
+The **Settings** page includes diagnostics and service logs.
 
 ## Documentation
 

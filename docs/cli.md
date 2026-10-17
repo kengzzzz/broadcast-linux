@@ -71,11 +71,39 @@ select **NVIDIA Broadcast Speaker** as the call app's output.
 | Disable automatic startup | `systemctl --user disable --now broadcast-linux` |
 | Check setup | `broadcast-linux doctor` |
 | List microphones and outputs | `broadcast-linux devices` |
+| Run effects on files | `broadcast-linux process --help` |
 | Read this boot's logs | `journalctl --user -u broadcast-linux -b` |
 
 [Configuration](configuration.md#apply-manual-edits) explains which changes need
 a restart. To run in the foreground, stop the user service first, then run
 `broadcast-linux run`.
+
+## Process files
+
+`broadcast-linux process` runs the effects on video and audio files, like the **Files**
+page. It needs `ffmpeg`.
+
+```sh
+broadcast-linux process --noise-removal --blur talk.mp4
+broadcast-linux process --studio-voice=warm -o ~/Music/clean *.wav
+broadcast-linux process --super-resolution 2160 --frame-generation=2 clip.mov
+```
+
+Optional values go after `=`, as in `--blur=0.75`. `broadcast-linux process --help`
+lists every effect.
+
+- New files go beside the original, or in the `-o` folder, named `NAME-broadcast`.
+  Existing files are never replaced.
+- Video effects make H.264 MP4 with AAC audio (libx264, else NVENC, else OpenH264).
+- Audio effects alone copy the video. MP4 and MOV keep their format, others become MKV.
+- Only the first audio track is kept. Other audio tracks and subtitles are left out.
+- WAV and FLAC stay WAV and FLAC, other audio becomes M4A. Audio comes out at 48 kHz,
+  with more than two channels mixed to stereo.
+- `--super-resolution` takes the new height (1080, 1440 or 2160) and only enlarges.
+- `--frame-generation` multiplies the frame rate by 2, 3 or 4.
+- Ctrl+C stops and removes the unfinished file.
+
+The live effects keep running but share the GPU, so they may slow down meanwhile.
 
 Config defaults to `~/.config/broadcast-linux/config.toml`. Downloaded NVIDIA files
 and the Wine prefix live in `~/.local/share/broadcast-linux/`. `XDG_CONFIG_HOME`

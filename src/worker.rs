@@ -1,11 +1,13 @@
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::gpu::Chosen;
 use crate::paths;
 
 pub struct Launch {
@@ -15,6 +17,8 @@ pub struct Launch {
     pub cwd: PathBuf,
     pub args: Vec<String>,
     pub stdin: Option<Stdio>,
+    /// `None` leaves the choice to CUDA and DXVK.
+    pub gpu: Option<Chosen>,
 }
 
 pub struct Pipes {
@@ -41,6 +45,9 @@ impl Worker {
         let dll_path = format!("{}:{}", workers.display(), paths::relay_dir().display());
         let mut child = Command::new("wine");
         child.envs(session_display());
+        if let Some(gpu) = &launch.gpu {
+            child.envs(gpu.pin());
+        }
         let mut child = child
             .arg(&program)
             .args(&launch.args)
@@ -64,6 +71,11 @@ impl Worker {
             stderr: child.stderr.take().expect("piped stderr"),
         };
         Ok((Self { child }, pipes))
+    }
+
+    /// `None` while the worker runs.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        Ok(self.child.try_wait()?)
     }
 
     fn signal_group(&self, signal: libc::c_int) {
@@ -91,6 +103,23 @@ fn session_display() -> Vec<(String, String)> {
         eprintln!("no DISPLAY or WAYLAND_DISPLAY in the session; NVIDIA effects need one to load");
     }
     vars
+}
+
+/// Unlike `BufRead::lines`, reads past non-UTF-8 lines, so a full pipe never stalls the worker.
+pub fn log_lines(stderr: impl Read) -> impl Iterator<Item = String> {
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    std::iter::from_fn(move || {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(
+                String::from_utf8_lossy(&bytes)
+                    .trim_end_matches(['\n', '\r'])
+                    .to_owned(),
+            ),
+        }
+    })
 }
 
 pub(crate) fn has_display(vars: &[(String, String)]) -> bool {
@@ -130,5 +159,17 @@ impl Drop for Worker {
         }
         self.signal_group(libc::SIGKILL);
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_past_lines_that_are_not_utf8() {
+        let stderr: &[u8] = b"one\r\nVid\xe9os\nthree";
+        let lines: Vec<String> = log_lines(stderr).collect();
+        assert_eq!(lines, ["one", "Vid\u{fffd}os", "three"]);
     }
 }

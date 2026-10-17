@@ -8,7 +8,7 @@ use crate::audio::Kind;
 use crate::camera::expand_home;
 use crate::config::{CameraConfig, Config};
 use crate::graph::Graph;
-use crate::nvidia::Installation;
+use crate::nvidia::{Feature, Installation};
 use crate::paths::{self, Paths};
 use crate::{gpu, prefix, setup, v4l2, webcam, worker};
 
@@ -150,7 +150,7 @@ pub fn check(paths: &Paths) -> Report {
         })
     };
 
-    report("gpu", gpu_check());
+    report("gpu", gpu_check(paths));
     report("wine", wine());
     report("nvidia files", nvidia(paths));
     report("wine prefix", prefix(paths));
@@ -161,6 +161,7 @@ pub fn check(paths: &Paths) -> Report {
     let service = service();
     let running = service.is_ok();
     report("service", service);
+    report("ffmpeg", ffmpeg());
 
     let config = match Config::load(&paths.config) {
         Ok(config) => {
@@ -174,7 +175,7 @@ pub fn check(paths: &Paths) -> Report {
         }
         Err(e) => {
             report("config", Err(e.into()));
-            for name in ["mic", "speaker", "virtual camera", "webcam"] {
+            for name in ["mic", "speaker", "virtual camera", "webcam", "rtx video"] {
                 report(name, skip("config did not load"));
             }
             return Report { version, items };
@@ -199,9 +200,11 @@ pub fn check(paths: &Paths) -> Report {
     if config.camera.enabled {
         report("virtual camera", loopback(&config.camera));
         report("webcam", webcam(&config.camera));
+        report("rtx video", rtx_video(paths, &config.camera));
     } else {
         report("virtual camera", skip("disabled in config"));
         report("webcam", skip("disabled in config"));
+        report("rtx video", skip("disabled in config"));
     }
     Report { version, items }
 }
@@ -221,17 +224,26 @@ fn output(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-fn gpu_check() -> Check {
-    let gpu = gpu::detect()?;
+fn gpu_check(paths: &Paths) -> Check {
+    let chosen = gpu::detect_configured(paths)?;
     let driver = output(
         "nvidia-smi",
         &["--query-gpu=driver_version", "--format=csv,noheader"],
     )?;
     let driver = driver.lines().next().unwrap_or_default();
-    Ok(format!(
+    let detail = format!(
         "{} ({}), driver {driver}",
-        gpu.name, gpu.generation
-    ))
+        chosen.gpu.name, chosen.generation
+    );
+    match chosen.fallback {
+        Some(fallback) => Err(Problem::warn(
+            format!(
+                "{detail}\n{fallback}. Pick another GPU in Settings, or remove gpu from [service] in the config."
+            ),
+            &[],
+        )),
+        None => Ok(detail),
+    }
 }
 
 fn wine() -> Check {
@@ -254,7 +266,7 @@ fn wine_major(version: &str) -> Option<u32> {
 }
 
 fn nvidia(paths: &Paths) -> Check {
-    if let Some(problem) = setup::files_problem(paths, gpu::detect()?.generation) {
+    if let Some(problem) = setup::files_problem(paths, gpu::detect_configured(paths)?.generation) {
         return Err(Problem::fail(problem));
     }
     let install = Installation::find(paths)?;
@@ -282,6 +294,23 @@ fn workers() -> Check {
         )));
     }
     Ok(paths::tilde(&paths::lib_dir()))
+}
+
+fn ffmpeg() -> Check {
+    match output("ffmpeg", &["-version"]) {
+        // "ffmpeg version n9.0.2 Copyright (c) ..."
+        Ok(version) => Ok(version
+            .lines()
+            .next()
+            .and_then(|line| line.split(" Copyright").next())
+            .unwrap_or_default()
+            .to_owned()),
+        Err(_) => Err(Problem {
+            status: Status::Skip,
+            detail: "not installed; only the File Processor needs it".into(),
+            fix: Vec::new(),
+        }),
+    }
 }
 
 fn display() -> Check {
@@ -363,19 +392,63 @@ fn webcam(camera: &CameraConfig) -> Check {
             "background image {background} does not exist"
         )));
     }
-    let format = webcam::choose(
-        &camera.input,
-        camera.input_format,
-        camera.width,
-        camera.height,
-    )?;
+    let (width, height) = if camera.super_resolution.enabled {
+        webcam::smaller_size(
+            &camera.input,
+            camera.input_format,
+            camera.width,
+            camera.height,
+        )?
+    } else {
+        (camera.width, camera.height)
+    };
+    let format = webcam::choose(&camera.input, camera.input_format, width, height)?;
     Ok(format!(
-        "{} {} {}x{}",
+        "{} {} {width}x{height}",
         camera.input,
-        format.label(),
-        camera.width,
-        camera.height
+        format.label()
     ))
+}
+
+fn rtx_video(paths: &Paths, camera: &CameraConfig) -> Check {
+    let install = match Installation::find(paths) {
+        Ok(install) => install,
+        // `nvidia files` already says so.
+        Err(_) if !camera.super_resolution.enabled && !camera.frame_generation.enabled => {
+            return Err(Problem {
+                status: Status::Skip,
+                detail: "the NVIDIA files are not installed".into(),
+                fix: Vec::new(),
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut ready = Vec::new();
+    let mut notes = Vec::new();
+    for (feature, enabled) in [
+        (Feature::SuperResolution, camera.super_resolution.enabled),
+        (Feature::FrameGeneration, camera.frame_generation.enabled),
+    ] {
+        match install.missing(feature) {
+            None => ready.push(feature.label()),
+            Some(reason) if enabled => {
+                return Err(Problem::fail(format!(
+                    "{reason}, so the camera can't start until it is turned off"
+                )));
+            }
+            Some(reason) => notes.push(reason),
+        }
+    }
+    let mut detail = if ready.is_empty() {
+        "not available".to_owned()
+    } else {
+        format!("{} available", ready.join(" and "))
+    };
+    for note in notes {
+        detail.push('\n');
+        detail.push_str(&note);
+    }
+    Ok(detail)
 }
 
 #[cfg(test)]

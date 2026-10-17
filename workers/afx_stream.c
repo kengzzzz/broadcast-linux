@@ -84,6 +84,23 @@ struct keepawake {
     void *stream;
 };
 
+/* Logs the GPU of the current CUDA context, the one the effects use. */
+static void log_gpu(void) {
+    typedef int (WINAPI *device_fn)(int *);
+    typedef int (WINAPI *text_fn)(char *, int, int);
+    HMODULE cuda = GetModuleHandleA("nvcuda.dll");
+    if (!cuda)
+        return;
+    device_fn get_device = (device_fn)GetProcAddress(cuda, "cuCtxGetDevice");
+    text_fn get_name = (text_fn)GetProcAddress(cuda, "cuDeviceGetName");
+    text_fn get_bus = (text_fn)GetProcAddress(cuda, "cuDeviceGetPCIBusId");
+    int device;
+    char name[256], bus[32];
+    if (get_device && get_name && get_bus && !get_device(&device) && !get_name(name, sizeof name, device) &&
+        !get_bus(bus, sizeof bus, device))
+        fprintf(stderr, "Running on %s at PCI %s\n", name, bus);
+}
+
 /* Runs after the effects load, so the context NVIDIA's runtime made current is reused. */
 static int keepawake_start(struct keepawake *k) {
     typedef int (WINAPI *get_ctx_fn)(void **);
@@ -109,16 +126,35 @@ static int keepawake_start(struct keepawake *k) {
 }
 
 int main(int argc, char **argv) {
+    const char *profile_model = NULL;
+    int profile_id = 0, offline = 0;
+    while (argc > 1 && !strncmp(argv[1], "--", 2)) {
+        if (!strcmp(argv[1], "--profile") && argc > 3) {
+            profile_model = argv[2];
+            profile_id = atoi(argv[3]);
+            argv += 3;
+            argc -= 3;
+        } else if (!strcmp(argv[1], "--offline")) {
+            offline = 1;
+            argv++;
+            argc--;
+        } else {
+            argc = 0;
+        }
+    }
     if (argc < 5 || (argc - 2) % 3) {
-        fprintf(stderr, "Usage: %s KEEP_AWAKE EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n",
-                argv[0]);
+        fprintf(stderr, "Usage: afx_stream.exe [--profile MODEL_PATH ID] [--offline] KEEP_AWAKE\n"
+                        "           EFFECT MODEL_PATH INTENSITY [EFFECT MODEL_PATH INTENSITY]...\n"
+                        "--profile sets the Studio Voice mic profile. --offline processes every frame of a file:\n"
+                        "nothing is dropped, the GPU is not kept awake, and any failed frame makes it exit with 6.\n");
         return 2;
     }
-    int keep_awake = atoi(argv[1]);
+    int keep_awake = offline ? 0 : atoi(argv[1]);
     int count = (argc - 2) / 3;
     setvbuf(stdin, NULL, _IONBF, 0);
     /* a small output pipe pushes any backlog back to stdin, where drop_backlog discards it */
-    fcntl(fileno(stdout), F_SETPIPE_SZ, 8192);
+    if (!offline)
+        fcntl(fileno(stdout), F_SETPIPE_SZ, 8192);
 
     HMODULE afx = LoadLibraryA("NVAudioEffects.dll");
     if (!afx) {
@@ -156,8 +192,17 @@ int main(int argc, char **argv) {
         set_u32(st->effect, "sample_rate", 48000);
         if ((status = set_float(st->effect, "intensity_ratio", intensity)))
             fprintf(stderr, "%s: intensity not supported (%d); ignored\n", st->name, status);
+        int profiled = profile_model && !strcmp(st->name, "studio_voice_low_latency");
+        if (profiled && (status = set_string(st->effect, "mic_profile_model", profile_model))) {
+            fprintf(stderr, "%s: setting the mic profile model failed: %d\n", st->name, status);
+            return 4;
+        }
         if ((status = load(st->effect))) {
             fprintf(stderr, "Load(%s) failed: %d\n", st->name, status);
+            return 4;
+        }
+        if (profiled && (status = set_u32(st->effect, "mic_profile_id", (unsigned)profile_id))) {
+            fprintf(stderr, "%s: mic profile %d failed: %d\n", st->name, profile_id, status);
             return 4;
         }
         unsigned int in = 0, out = 0;
@@ -184,15 +229,18 @@ int main(int argc, char **argv) {
         keepawake.memset_async = NULL;
         fprintf(stderr, "Could not start the GPU keep-awake; runs may be slow while the GPU idles\n");
     }
+    log_gpu();
     fprintf(stderr, "%s ready; %u samples per frame at 48 kHz mono f32\n", names, frame);
 
     LARGE_INTEGER freq, t0, t1;
     QueryPerformanceFrequency(&freq);
     unsigned long frames = 0, failures = 0, dropped = 0;
 
-    dropped = drop_backlog(in_buf, frame);
-    fprintf(stderr, "Dropped %lu stale frames queued during startup\n", dropped);
-    dropped = 0;
+    if (!offline) {
+        dropped = drop_backlog(in_buf, frame);
+        fprintf(stderr, "Dropped %lu stale frames queued during startup\n", dropped);
+        dropped = 0;
+    }
 
     for (;;) {
         /* With no input until the model unloads, run on silence so the GPU stays awake.
@@ -208,7 +256,8 @@ int main(int argc, char **argv) {
         }
         if (!read_full(in_buf, frame))
             break;
-        dropped += drop_backlog(in_buf, frame);
+        if (!offline)
+            dropped += drop_backlog(in_buf, frame);
         const float *cur = in_buf;
         for (int i = 0; i < count; i++) {
             struct stage *st = &stages[i];
@@ -247,5 +296,6 @@ int main(int argc, char **argv) {
     for (int i = 0; i < count; i++)
         destroy(stages[i].effect);
     FreeLibrary(afx);
-    return 0;
+    /* A failed frame passes through unprocessed, which a file must not keep. */
+    return offline && failures ? 6 : 0;
 }

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, ErrorKind, PipeWriter, Read, Write};
+use std::io::{self, ErrorKind, PipeWriter, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -17,15 +17,18 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{CameraConfig, InputColor};
 use crate::frames::{Decoder, SharedFrames};
-use crate::nvidia::{self, Installation};
+use crate::gpu::{self, Lazy};
+use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::status::{self, State};
-use crate::v4l2::Loopback;
+use crate::v4l2::{InUse, Loopback};
 use crate::webcam::{self, Capture, Color, Format};
-use crate::worker::{Launch, Worker};
+use crate::worker::{self, Launch, Worker};
 
 /// Placeholder rate while no effect is running; enough to keep the device listed.
 const PLACEHOLDER_INTERVAL: Duration = Duration::from_millis(200);
+const SESSION_POLL: Duration = Duration::from_millis(20);
+const LOAD_WINDOW: Duration = Duration::from_secs(1);
 
 pub enum Control {
     Reload {
@@ -50,6 +53,7 @@ impl Camera {
         paths: Paths,
         config: CameraConfig,
         idle_timeout: Duration,
+        gpu: Lazy,
         notify: Notify,
     ) -> Result<Self> {
         let (commands, receiver) = mpsc::channel();
@@ -60,21 +64,37 @@ impl Camera {
         }));
         let shared = Arc::clone(&status);
         let thread = thread::spawn(move || {
-            let loopback = match Loopback::open(&config.device, config.width, config.height) {
-                Ok(loopback) => loopback,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
+            let mut waiting = Waiting {
+                config,
+                idle_timeout,
+                commands: &receiver,
+                status: &shared,
+                notify: &notify,
+                ready: Some(ready_tx),
+                logged: None,
+                retry: Duration::from_secs(1),
             };
+            let Some(loopback) = waiting.open() else {
+                return;
+            };
+            let Waiting {
+                config,
+                idle_timeout,
+                ready,
+                ..
+            } = waiting;
             let mut camera = CameraLoop::new(paths, config, idle_timeout, loopback, receiver);
+            camera.gpu = gpu;
             camera.status = shared;
             camera.notify = notify;
+            camera.set_fps();
             // SAFETY: no session runs yet, so nothing else writes the loopback's buffers.
             if let Err(e) = unsafe { camera.loopback.write_frame(&camera.placeholder) } {
                 eprintln!("camera: writing the first placeholder frame: {e}");
             }
-            let _ = ready_tx.send(Ok(()));
+            if let Some(ready) = ready {
+                let _ = ready.send(Ok(()));
+            }
             camera.run();
         });
         ready_rx.recv().context("camera thread ended early")??;
@@ -103,18 +123,164 @@ impl Drop for Camera {
     }
 }
 
+/// The camera thread until the loopback opens at the configured size.
+struct Waiting<'a> {
+    config: CameraConfig,
+    idle_timeout: Duration,
+    commands: &'a Receiver<Control>,
+    status: &'a Mutex<status::Device>,
+    notify: &'a Notify,
+    ready: Option<Sender<Result<()>>>,
+    /// The held and the configured size last logged.
+    logged: Option<((u32, u32), (u32, u32))>,
+    /// An app may keep the device, and its size, without reading, so retries back off.
+    retry: Duration,
+}
+
+impl Waiting<'_> {
+    /// `None` on `Quit`, or on an error, which goes to `ready` or the status.
+    fn open(&mut self) -> Option<Loopback> {
+        let error = loop {
+            let config = &self.config;
+            match Loopback::open(&config.device, config.width, config.height) {
+                Ok(loopback) => return Some(loopback),
+                Err(e) => match e
+                    .downcast_ref::<InUse>()
+                    .map(|held| (held.width, held.height))
+                {
+                    Some(held) => match self.hold(held) {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(e) => break e,
+                    },
+                    None => break e,
+                },
+            }
+        };
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(Err(error));
+        } else {
+            eprintln!("camera: disabled: {error:#}");
+            let error = Some(format!("{error:#}"));
+            set_status(self.status, self.notify, State::Unavailable, 0, error, None);
+        }
+        None
+    }
+
+    /// Sends placeholder frames at `held`, so apps holding that size don't stall. True once
+    /// they close it or the config asks for `held`, false on `Quit`.
+    fn hold(&mut self, (width, height): (u32, u32)) -> Result<bool> {
+        let mut loopback = Loopback::open(&self.config.device, width, height)?;
+        let frame = placeholder(width, height);
+        // SAFETY: no session runs, so nothing else writes the loopback's buffers.
+        unsafe { loopback.write_frame(&frame) }?;
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(Ok(()));
+        }
+        let retry_at = Instant::now() + self.retry;
+        self.retry = (self.retry * 2).min(Duration::from_secs(30));
+        let mut in_use = true;
+        loop {
+            match self.commands.try_recv() {
+                Ok(Control::Quit) | Err(TryRecvError::Disconnected) => return Ok(false),
+                Ok(Control::Reload {
+                    config,
+                    idle_timeout,
+                }) => {
+                    self.config = config;
+                    self.idle_timeout = idle_timeout;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+            let (w, h) = (self.config.width, self.config.height);
+            if (w, h) == (width, height) || (!in_use && Instant::now() >= retry_at) {
+                return Ok(true);
+            }
+            if self.logged != Some(((width, height), (w, h))) {
+                self.logged = Some(((width, height), (w, h)));
+                eprintln!(
+                    "camera: {} is in use at {width}x{height}; it switches to {w}x{h} once the apps using it close it",
+                    self.config.device
+                );
+            }
+            set_status(
+                self.status,
+                self.notify,
+                State::Unavailable,
+                usize::from(in_use),
+                Some(format!(
+                    "an app is using it at {width} × {height}. It switches to {w} × {h} once the app closes the camera."
+                )),
+                None,
+            );
+            // SAFETY: as above.
+            let _ = unsafe { loopback.write_frame(&frame) };
+            let mut fd = libc::pollfd {
+                fd: loopback.fd(),
+                events: libc::POLLPRI,
+                revents: 0,
+            };
+            let timeout = i32::try_from(PLACEHOLDER_INTERVAL.as_millis()).unwrap_or(i32::MAX);
+            // SAFETY: one valid pollfd for the duration of the call.
+            unsafe { libc::poll(&raw mut fd, 1, timeout) };
+            if let Some(usage) = loopback.take_usage() {
+                in_use = usage;
+            }
+        }
+    }
+}
+
+fn set_status(
+    status: &Mutex<status::Device>,
+    notify: &Notify,
+    state: State,
+    readers: usize,
+    error: Option<String>,
+    load: Option<status::Load>,
+) {
+    let device = status::Device {
+        state,
+        readers,
+        error,
+        load,
+    };
+    let mut status = status.lock().unwrap();
+    // Loads go out with the service's tick. Notifying for them would block this thread on the
+    // service's event channel every second.
+    let changed = (status.state, status.readers, &status.error)
+        != (device.state, device.readers, &device.error);
+    *status = device;
+    drop(status);
+    if changed {
+        notify();
+    }
+}
+
+/// Black, in YUYV.
+fn placeholder(width: u32, height: u32) -> Vec<u8> {
+    [16u8, 128].repeat(width as usize * height as usize)
+}
+
 /// Fields drop in order: closing `tokens` and stopping the worker unblock the feed
 /// before it is joined.
 struct Session {
     tokens: File,
-    _worker: Option<Worker>,
+    worker: Option<Worker>,
     _feed: Feed,
     frames: Arc<SharedFrames>,
     free: Sender<Freed>,
     /// With mapped loopback buffers, the slot on screen (`Loopback::shown`) stays out of
     /// circulation until a newer frame is queued, so the feed and worker never write it.
     hold_shown: bool,
+    spread: Spread,
     live: bool,
+    meter: Arc<Mutex<Meter>>,
+    /// The webcam's frame interval.
+    budget: Duration,
+    /// Frames written to the loopback since `measured`.
+    shown: u32,
+    measured: Instant,
+    load: Option<status::Load>,
 }
 
 struct Freed {
@@ -143,14 +309,14 @@ impl Pace {
         self.decodes.push(decode);
     }
 
-    pub fn done(&mut self, at: Instant) {
-        let Some(sent) = self.sent.pop_front() else {
-            return;
-        };
+    /// Returns the run it counted.
+    pub fn done(&mut self, at: Instant) -> Option<Duration> {
+        let sent = self.sent.pop_front()?;
         // The first run also loads the models, so it isn't counted.
-        if let Some(last) = self.last_done.replace(at) {
-            self.runs.push(at.saturating_duration_since(sent.max(last)));
-        }
+        let last = self.last_done.replace(at)?;
+        let run = at.saturating_duration_since(sent.max(last));
+        self.runs.push(run);
+        Some(run)
     }
 
     /// When to start decoding the next frame; `None` for right away.
@@ -184,6 +350,93 @@ impl Recent {
     }
 }
 
+/// Spreads each slot's frames evenly until the next slot is due. Frame Generation puts
+/// several frames in a slot.
+struct Spread {
+    frames: usize,
+    /// The webcam's frame interval, until the worker's own is measured.
+    nominal: Duration,
+    intervals: Recent,
+    last: Option<Instant>,
+    arrivals: usize,
+    held: Option<Held>,
+}
+
+struct Held {
+    slot: usize,
+    arrived: Instant,
+    step: Duration,
+    next: usize,
+}
+
+impl Spread {
+    fn new(frames: usize, nominal: Duration) -> Self {
+        Self {
+            frames: frames.max(1),
+            nominal,
+            intervals: Recent::default(),
+            last: None,
+            arrivals: 0,
+            held: None,
+        }
+    }
+
+    /// Returns the slot this one replaces, with its arrival.
+    fn arrived(&mut self, slot: usize, at: Instant) -> Option<(usize, Instant)> {
+        // The second slot was queued while the models loaded, so its gap isn't counted.
+        if let Some(last) = self.last.replace(at)
+            && self.arrivals >= 2
+        {
+            self.intervals.push(at.saturating_duration_since(last));
+        }
+        self.arrivals += 1;
+        let interval = self.intervals.median().unwrap_or(self.nominal);
+        let step = interval / u32::try_from(self.frames).unwrap_or(1);
+        let replaced = self.held.replace(Held {
+            slot,
+            arrived: at,
+            step,
+            next: 0,
+        });
+        replaced.map(|held| (held.slot, held.arrived))
+    }
+
+    /// The newest frame due by `now`, as (slot, index). Overdue frames are skipped.
+    fn due(&mut self, now: Instant) -> Option<(usize, usize)> {
+        let held = self.held.as_mut()?;
+        let mut due = None;
+        while held.next < self.frames && held.at(held.next) <= now {
+            due = Some((held.slot, held.next));
+            held.next += 1;
+        }
+        due
+    }
+
+    /// The held slot and its arrival, once its last frame is shown.
+    fn release(&mut self) -> Option<(usize, Instant)> {
+        let held = self.held.take_if(|held| held.next >= self.frames)?;
+        Some((held.slot, held.arrived))
+    }
+
+    fn next_at(&self) -> Option<Instant> {
+        let held = self.held.as_ref()?;
+        (held.next < self.frames).then(|| held.at(held.next))
+    }
+}
+
+impl Held {
+    fn at(&self, frame: usize) -> Instant {
+        self.arrived + self.step * u32::try_from(frame).unwrap_or(u32::MAX)
+    }
+}
+
+/// Runs since the camera loop last took them.
+#[derive(Default)]
+struct Meter {
+    busy: Duration,
+    runs: u32,
+}
+
 struct Feed {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -197,6 +450,7 @@ impl Feed {
         free: Receiver<Freed>,
         mut tokens: PipeWriter,
         to_worker: bool,
+        meter: Arc<Mutex<Meter>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
@@ -212,8 +466,10 @@ impl Feed {
                     });
                     match free.recv_timeout(wait) {
                         Ok(freed) => {
-                            if let Some(done) = freed.done {
-                                pace.done(done);
+                            if let Some(run) = freed.done.and_then(|done| pace.done(done)) {
+                                let mut meter = meter.lock().unwrap();
+                                meter.busy += run;
+                                meter.runs += 1;
                             }
                             slots.push_back(freed.slot);
                         }
@@ -293,6 +549,7 @@ struct CameraLoop {
     worker_line: Arc<Mutex<String>>,
     status: Arc<Mutex<status::Device>>,
     notify: Notify,
+    gpu: Lazy,
 }
 
 impl CameraLoop {
@@ -304,7 +561,6 @@ impl CameraLoop {
         commands: Receiver<Control>,
     ) -> Self {
         let (width, height) = (config.width, config.height);
-        let frame = width as usize * height as usize * 2;
         Self {
             paths,
             config,
@@ -318,11 +574,12 @@ impl CameraLoop {
             idle_since: None,
             retry_at: None,
             failures: 0,
-            placeholder: [16u8, 128].repeat(frame / 2),
+            placeholder: placeholder(width, height),
             error: None,
             worker_line: Arc::default(),
             status: Arc::default(),
             notify: Box::new(|| {}),
+            gpu: Lazy::default(),
         }
     }
 
@@ -353,10 +610,12 @@ impl CameraLoop {
                 next_placeholder = Instant::now() + PLACEHOLDER_INTERVAL;
             }
 
-            let wait = if self.session.is_some() {
-                Duration::from_millis(20)
-            } else {
-                next_placeholder.saturating_duration_since(Instant::now())
+            let now = Instant::now();
+            let wait = match &self.session {
+                Some(session) => session.spread.next_at().map_or(SESSION_POLL, |at| {
+                    at.saturating_duration_since(now).min(SESSION_POLL)
+                }),
+                None => next_placeholder.saturating_duration_since(now),
             };
             self.poll(wait);
 
@@ -364,7 +623,9 @@ impl CameraLoop {
                 self.usage_changed(in_use);
             }
             self.pump_frames();
+            self.show_due();
             self.check_timers();
+            self.measure();
             self.publish();
         }
         self.stop();
@@ -376,17 +637,43 @@ impl CameraLoop {
             Some(s) if !s.live => State::Loading,
             Some(_) => State::Running,
         };
-        let device = status::Device {
+        set_status(
+            &self.status,
+            &self.notify,
             state,
-            readers: usize::from(self.in_use),
-            error: self.error.clone(),
+            usize::from(self.in_use),
+            self.error.clone(),
+            self.session.as_ref().and_then(|s| s.load),
+        );
+    }
+
+    fn measure(&mut self) {
+        let Some(session) = self.session.as_mut().filter(|s| s.live) else {
+            return;
         };
-        let mut status = self.status.lock().unwrap();
-        if *status != device {
-            *status = device;
-            drop(status);
-            (self.notify)();
+        let elapsed = session.measured.elapsed();
+        if elapsed < LOAD_WINDOW {
+            return;
         }
+        let Meter { busy, runs } = std::mem::take(&mut *session.meter.lock().unwrap());
+        let shown = std::mem::take(&mut session.shown);
+        session.measured = Instant::now();
+        let micros = |d: Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+        // No finished run: keep the last time, and fps shows the stall.
+        let busy_us = if runs > 0 {
+            Some(micros(busy / runs))
+        } else {
+            session.load.map(|load| load.busy_us)
+        };
+        session.load = busy_us
+            .filter(|_| session.worker.is_some())
+            .map(|busy_us| status::Load {
+                busy_us,
+                budget_us: micros(session.budget),
+                fps_x10: u32::try_from(u128::from(shown) * 10_000_000 / elapsed.as_micros().max(1))
+                    .unwrap_or(u32::MAX),
+                target_fps_x10: self.config.fps.saturating_mul(10),
+            });
     }
 
     fn fail(&mut self, message: String) {
@@ -407,7 +694,8 @@ impl CameraLoop {
                 revents: 0,
             },
         ];
-        let timeout = i32::try_from(wait.as_millis()).unwrap_or(i32::MAX);
+        // Rounded up, so a paced frame is never polled for in a busy loop.
+        let timeout = i32::try_from(wait.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
         // SAFETY: `fds` is a valid array of pollfd for the duration of the call; poll
         // ignores entries with a negative fd.
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
@@ -459,13 +747,24 @@ impl CameraLoop {
         if config == self.config {
             return;
         }
+        let fps_changed = config.fps != self.config.fps;
         self.config = config;
+        if fps_changed {
+            self.set_fps();
+        }
         // New settings get fresh retries, even after the last ones gave up.
         self.failures = 0;
         self.retry_at = None;
         if self.session.is_some() || self.in_use {
             self.stop();
             self.start();
+        }
+    }
+
+    fn set_fps(&self) {
+        let (device, fps) = (&self.config.device, self.config.fps);
+        if let Err(e) = self.loopback.set_fps(fps) {
+            eprintln!("camera: could not set {device} to {fps} fps: {e}");
         }
     }
 
@@ -510,10 +809,22 @@ impl CameraLoop {
 
     fn start_session(&self) -> Result<Session> {
         let input = &self.config.input;
-        let format = webcam::choose(input, self.config.input_format, self.width, self.height)?;
-        let mut capture = Capture::open(input, format, self.width, self.height, self.config.fps)?;
+        let (width, height) = if self.config.super_resolution.enabled {
+            webcam::smaller_size(input, self.config.input_format, self.width, self.height)?
+        } else {
+            (self.width, self.height)
+        };
+        let fps = self.config.capture_fps();
+        let format = webcam::choose(input, self.config.input_format, width, height)?;
+        let mut capture = Capture::open(input, format, width, height, fps)?;
+        let budget = capture
+            .interval()
+            .unwrap_or(Duration::from_secs(1) / fps.max(1));
         let color = Color::resolve(format, self.config.input_color, capture.reported_color());
-        eprintln!("camera: capturing {input} as {}, {color}", format.label());
+        eprintln!(
+            "camera: capturing {input} at {width}x{height} {fps} fps as {}, {color}",
+            format.label()
+        );
         if format == Format::Mjpeg && self.config.input_color != InputColor::Auto {
             eprintln!("camera: input_color only applies to YUYV and NV12, so MJPEG ignores it");
         }
@@ -525,9 +836,9 @@ impl CameraLoop {
                     format,
                     color,
                     frame,
-                    self.width,
-                    self.height,
-                    self.config.fps,
+                    width,
+                    height,
+                    fps,
                     self.config.parallel_decode,
                 )
             })? {
@@ -539,14 +850,22 @@ impl CameraLoop {
         };
         let effects = self.config.has_effects();
         let in_bytes = if effects { decoder.worker_bytes() } else { 0 };
+        let multiplier = self.config.frame_multiplier() as usize;
+        // Made frames have to be paced, so they are copied into the loopback.
+        let buffers = if multiplier > 1 {
+            None
+        } else {
+            self.loopback.buffers()
+        };
         let frames = Arc::new(SharedFrames::new(
             in_bytes,
-            self.placeholder.len(),
-            self.loopback.buffers(),
+            self.placeholder.len() * multiplier,
+            buffers,
         )?);
         let (tokens_in, tokens_out) = io::pipe()?;
         let (worker, tokens) = if effects {
-            let (worker, stdout) = self.spawn_worker(Stdio::from(tokens_in), &decoder, &frames)?;
+            let (worker, stdout) =
+                self.spawn_worker(Stdio::from(tokens_in), &decoder, &frames, (width, height))?;
             (Some(worker), File::from(OwnedFd::from(stdout)))
         } else {
             (None, File::from(OwnedFd::from(tokens_in)))
@@ -560,6 +879,7 @@ impl CameraLoop {
                 done: None,
             });
         }
+        let meter = Arc::default();
         let feed = Feed::start(
             capture,
             decoder,
@@ -567,15 +887,22 @@ impl CameraLoop {
             free_slots,
             tokens_out,
             effects,
+            Arc::clone(&meter),
         );
         Ok(Session {
             tokens,
-            _worker: worker,
+            worker,
             _feed: feed,
             frames,
             free,
             hold_shown,
+            spread: Spread::new(multiplier, Duration::from_secs(1) / fps.max(1)),
             live: false,
+            meter,
+            budget,
+            shown: 0,
+            measured: Instant::now(),
+            load: None,
         })
     }
 
@@ -584,20 +911,34 @@ impl CameraLoop {
         tokens: Stdio,
         decoder: &Decoder,
         frames: &SharedFrames,
+        size: (u32, u32),
     ) -> Result<(Worker, ChildStdout)> {
         let install = Installation::find(&self.paths)?;
-        let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
-        let mut args = vec![
-            nvidia::windows_path(&models),
-            "--size".into(),
-            self.size(),
+        let gpu = self.gpu.get();
+        if let Some(problem) = gpu.as_ref().and_then(|gpu| install.wrong_generation(gpu)) {
+            bail!(problem);
+        }
+        let background = self
+            .config
+            .background
+            .as_deref()
+            .map(|image| prepare_background(&self.paths, image, size.0, size.1))
+            .transpose()?;
+        let mut args = effect_args(
+            &self.config,
+            &install,
+            size,
+            (self.width, self.height),
+            background.as_deref(),
+        )?;
+        args.extend([
             "--input".into(),
             decoder.layout().worker_name().into(),
             "--color".into(),
             decoder.color().worker_name().into(),
             "--shm".into(),
             frames.path().context("no shared frames for the worker")?,
-        ];
+        ]);
         if let Some(buffers) = frames.loopback() {
             let offsets: Vec<String> = buffers.offsets().iter().map(u32::to_string).collect();
             args.extend([
@@ -607,47 +948,6 @@ impl CameraLoop {
                 offsets.join(","),
             ]);
         }
-        if self.config.video_noise_removal.enabled {
-            let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
-            args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
-        }
-        if self.config.eye_contact.enabled {
-            let models = install.model_dir(nvidia::EYE_CONTACT_MODELS)?;
-            args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
-        }
-        if self.config.auto_frame.enabled {
-            let models = install.model_dir(nvidia::FACE_DETECTION_MODELS)?;
-            args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
-        }
-        if let Some(background) = &self.config.background {
-            let cache = prepare_background(&self.paths, background, self.width, self.height)?;
-            args.extend(["--background".into(), cache.display().to_string()]);
-        }
-        if self.config.background_blur.enabled {
-            args.extend([
-                "--blur".into(),
-                self.config.background_blur.strength.to_string(),
-            ]);
-        }
-        if self.config.background_removal.enabled {
-            args.push("--remove-background".into());
-        }
-        let light = self.config.studio_light;
-        if light.enabled {
-            let models = install.model_dir(nvidia::STUDIO_LIGHT_MODELS)?;
-            args.extend([
-                "--relight".into(),
-                nvidia::windows_path(&models),
-                // Read with winelib fopen, which takes Unix paths.
-                "--hdr".into(),
-                install
-                    .studio_light(light.preset.file())?
-                    .display()
-                    .to_string(),
-                "--strength".into(),
-                light.strength.to_string(),
-            ]);
-        }
 
         let (worker, pipes) = Worker::spawn(Launch {
             program: "camera_stream",
@@ -655,20 +955,17 @@ impl CameraLoop {
             cwd: install.runtime,
             args,
             stdin: Some(tokens),
+            gpu,
         })?;
         let last = Arc::clone(&self.worker_line);
         last.lock().unwrap().clear();
         thread::spawn(move || {
-            for line in BufReader::new(pipes.stderr).lines().map_while(Result::ok) {
+            for line in worker::log_lines(pipes.stderr) {
                 eprintln!("camera worker: {line}");
                 line.clone_into(&mut last.lock().unwrap());
             }
         });
         Ok((worker, pipes.stdout))
-    }
-
-    fn size(&self) -> String {
-        format!("{}x{}", self.width, self.height)
     }
 
     fn pump_frames(&mut self) {
@@ -704,7 +1001,8 @@ impl CameraLoop {
                     // Show only the newest finished frame and hand older ones straight back.
                     let (&newest, older) = slots.split_last().unwrap_or((&0, &[]));
                     let newest = usize::from(newest);
-                    let done = Some(Instant::now());
+                    let now = Instant::now();
+                    let done = Some(now);
                     let free = |slot| {
                         let _ = session.free.send(Freed { slot, done });
                     };
@@ -713,22 +1011,24 @@ impl CameraLoop {
                     }
                     if !session.live {
                         session.live = true;
+                        session.measured = now;
                         self.failures = 0;
                         self.error = None;
                         eprintln!("camera: effect running");
                     }
                     if let Some(shown) = held {
                         let freed = if self.loopback.queue(newest).is_ok() {
+                            session.shown += 1;
                             shown
                         } else {
                             newest
                         };
                         free(freed);
-                    } else {
-                        // SAFETY: the token gives this thread slot `newest` until it is sent
-                        // back, and without mapped buffers write_frame() only copies.
-                        let _ = unsafe { self.loopback.write_frame(session.frames.output(newest)) };
-                        free(newest);
+                    } else if let Some((slot, done)) = session.spread.arrived(newest, now) {
+                        let _ = session.free.send(Freed {
+                            slot,
+                            done: Some(done),
+                        });
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
@@ -741,6 +1041,122 @@ impl CameraLoop {
             }
         }
     }
+
+    /// Also frees slots whose frames have all been shown.
+    fn show_due(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if let Some((slot, frame)) = session.spread.due(Instant::now()) {
+            let bytes = self.placeholder.len();
+            // SAFETY: the token gives this thread the slot until it is sent back. In copy mode
+            // neither the feed nor the worker gets the loopback's buffers.
+            let written = unsafe {
+                let output = session.frames.output(slot);
+                self.loopback.write_frame(&output[frame * bytes..][..bytes])
+            };
+            if written.is_ok() {
+                session.shown += 1;
+            }
+        }
+        if let Some((slot, done)) = session.spread.release() {
+            let _ = session.free.send(Freed {
+                slot,
+                done: Some(done),
+            });
+        }
+    }
+}
+
+/// `out_size` is Super Resolution's output. `background` is the replacement image as BGR24
+/// at `size`.
+pub fn effect_args(
+    config: &CameraConfig,
+    install: &Installation,
+    (width, height): (u32, u32),
+    out_size: (u32, u32),
+    background: Option<&Path>,
+) -> Result<Vec<String>> {
+    let models = install.model_dir(nvidia::BACKGROUND_MODELS)?;
+    let mut args = vec![
+        nvidia::windows_path(&models),
+        "--size".into(),
+        format!("{width}x{height}"),
+    ];
+    if config.video_noise_removal.enabled {
+        let models = install.model_dir(nvidia::VIDEO_DENOISE_MODELS)?;
+        args.extend(["--denoise".into(), nvidia::windows_path(&models)]);
+    }
+    if config.eye_contact.enabled {
+        let models = install.model_dir(nvidia::EYE_CONTACT_MODELS)?;
+        args.extend(["--eye-contact".into(), nvidia::windows_path(&models)]);
+    }
+    if config.auto_frame.enabled {
+        let models = install.model_dir(nvidia::FACE_DETECTION_MODELS)?;
+        args.extend(["--auto-frame".into(), nvidia::windows_path(&models)]);
+    }
+    if let Some(background) = background {
+        args.extend(["--background".into(), background.display().to_string()]);
+    }
+    if config.background_blur.enabled {
+        args.extend(["--blur".into(), config.background_blur.strength.to_string()]);
+    }
+    if config.background_removal.enabled {
+        args.push("--remove-background".into());
+    }
+    let light = config.studio_light;
+    if light.enabled {
+        let models = install.model_dir(nvidia::STUDIO_LIGHT_MODELS)?;
+        args.extend([
+            "--relight".into(),
+            nvidia::windows_path(&models),
+            // Read with winelib fopen, which takes Unix paths.
+            "--hdr".into(),
+            install
+                .studio_light(light.preset.file())?
+                .display()
+                .to_string(),
+            "--strength".into(),
+            light.strength.to_string(),
+        ]);
+    }
+    args.extend(rtx_video_args(config, install, out_size)?);
+    Ok(args)
+}
+
+fn rtx_video_args(
+    config: &CameraConfig,
+    install: &Installation,
+    (width, height): (u32, u32),
+) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if config.super_resolution.enabled {
+        if let Some(reason) = install.missing(Feature::SuperResolution) {
+            bail!(reason);
+        }
+        let ngx = gpu::ngx_dir().context(gpu::NO_NGX)?;
+        args.extend([
+            "--super-res".into(),
+            config.super_resolution.mode.quality_level().to_string(),
+            "--out-size".into(),
+            format!("{width}x{height}"),
+            "--ngx-dir".into(),
+            nvidia::windows_path(&ngx),
+        ]);
+    }
+    let generation = config.frame_generation;
+    if generation.enabled {
+        if let Some(reason) = install.missing(Feature::FrameGeneration) {
+            bail!(reason);
+        }
+        args.extend([
+            "--frame-gen".into(),
+            generation.multiplier.to_string(),
+            "--frame-gen-mode".into(),
+            generation.mode.worker_value().to_string(),
+        ]);
+    }
+    Ok(args)
 }
 
 fn effects_name(config: &CameraConfig) -> String {
@@ -765,6 +1181,13 @@ fn effects_name(config: &CameraConfig) -> String {
     }
     if config.studio_light.enabled {
         names.push("Studio Light");
+    }
+    if config.super_resolution.enabled {
+        names.push("Super Resolution");
+    }
+    let generation = format!("Frame Generation {}x", config.frame_generation.multiplier);
+    if config.frame_generation.enabled {
+        names.push(&generation);
     }
     if names.is_empty() {
         "passthrough (no effects enabled)".into()
@@ -799,8 +1222,14 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
             let _ = fs::remove_file(old.path());
         }
     }
+    fs::write(&cache, background_bgr(&source, width, height)?)?;
+    Ok(cache)
+}
+
+/// Cropped to fill `width`x`height`, as BGR24.
+pub fn background_bgr(source: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
     let read = || -> image::ImageResult<DynamicImage> {
-        let mut decoder = ImageReader::open(&source)?
+        let mut decoder = ImageReader::open(source)?
             .with_guessed_format()?
             .into_decoder()?;
         let orientation = decoder.orientation()?;
@@ -812,9 +1241,7 @@ fn prepare_background(paths: &Paths, image: &str, width: u32, height: u32) -> Re
     let rgb = image
         .resize_to_fill(width, height, FilterType::CatmullRom)
         .into_rgb8();
-    let bgr: Vec<u8> = rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect();
-    fs::write(&cache, bgr)?;
-    Ok(cache)
+    Ok(rgb.pixels().flat_map(|p| [p[2], p[1], p[0]]).collect())
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
@@ -879,6 +1306,61 @@ mod tests {
             recent.push(ms(10));
         }
         assert_eq!(recent.median(), Some(ms(10)), "only recent runs count");
+    }
+
+    #[test]
+    fn spreads_made_frames_until_the_next_slot() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut spread = Spread::new(2, ms(40));
+        assert_eq!(spread.next_at(), None);
+        assert_eq!(spread.arrived(0, t0), None);
+        assert_eq!(spread.due(t0), Some((0, 0)));
+        assert_eq!(spread.release(), None, "a frame is left");
+        assert_eq!(
+            spread.next_at(),
+            Some(t0 + ms(20)),
+            "half the webcam interval"
+        );
+        assert_eq!(spread.due(t0 + ms(19)), None);
+        assert_eq!(spread.due(t0 + ms(20)), Some((0, 1)));
+        assert_eq!(spread.release(), Some((0, t0)), "returned with its arrival");
+        assert_eq!(spread.next_at(), None);
+
+        // The second gap isn't measured, so the steps still follow the webcam.
+        spread.arrived(1, t0 + ms(25));
+        assert_eq!(spread.next_at(), Some(t0 + ms(25)));
+        spread.due(t0 + ms(25));
+        assert_eq!(spread.next_at(), Some(t0 + ms(45)));
+        // A slot that comes early replaces one not fully shown.
+        assert_eq!(spread.arrived(0, t0 + ms(85)), Some((1, t0 + ms(25))));
+        spread.due(t0 + ms(85));
+        assert_eq!(
+            spread.next_at(),
+            Some(t0 + ms(115)),
+            "the measured 60 ms gap"
+        );
+    }
+
+    #[test]
+    fn late_frames_skip_to_the_newest() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut spread = Spread::new(4, ms(40));
+        spread.arrived(0, t0);
+        assert_eq!(spread.due(t0 + ms(25)), Some((0, 2)));
+        assert_eq!(spread.release(), None);
+        assert_eq!(spread.due(t0 + ms(30)), Some((0, 3)));
+        assert_eq!(spread.release(), Some((0, t0)));
+
+        let mut single = Spread::new(1, ms(40));
+        single.arrived(1, t0);
+        assert_eq!(single.due(t0), Some((1, 0)));
+        assert_eq!(
+            single.release(),
+            Some((1, t0)),
+            "one frame is released at once"
+        );
     }
 
     #[test]

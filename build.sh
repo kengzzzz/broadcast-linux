@@ -28,7 +28,9 @@ install -Dm755 -t "$out/bin" "$root/target/release/broadcast-linux" "$root/targe
 
 cp -r "$root/wine-nvcuda" "$work/relay-src"
 rm -rf "$work/relay-src/.git"
-patch -d "$work/relay-src" -p1 --quiet < "$root/patches/nvcuda-export-table-d2688bf2.patch"
+for p in "$root"/patches/nvcuda-*.patch; do
+    patch -d "$work/relay-src" -p1 --quiet < "$p"
+done
 "$work/relay-src/package-release.sh" relay "$work/relay" --fakedll > "$work/relay.log" 2>&1 || {
     tail -40 "$work/relay.log" >&2
     exit 1

@@ -10,7 +10,8 @@ license=(MIT LGPL-2.1-or-later BSD-3-Clause IJG OFL-1.1 Ubuntu-font-1.0 Bitstrea
 depends=('glibc>=2.35' libgcc libpipewire pipewire wireplumber 'wine>=10' nvidia-utils libglvnd libxkbcommon wayland)
 optdepends=('pipewire-pulse: lets apps that use PulseAudio (most of them) see the devices'
             'v4l2loopback-dkms: virtual camera, unless your kernel already provides the module'
-            'xdg-desktop-portal: picking a background image in the settings window'
+            'ffmpeg: the File Processor, which runs the effects on video and audio files'
+            'xdg-desktop-portal: the file pickers in the settings window'
             'libx11: the settings window on X11'
             'libxcursor: the settings window on X11'
             'libxi: the settings window on X11'

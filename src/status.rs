@@ -26,12 +26,36 @@ pub enum State {
     Paused,
 }
 
+/// Over the last second.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Load {
+    /// Mean worker time per frame.
+    pub busy_us: u32,
+    /// Time between frames: the capture interval, or the audio frame.
+    pub budget_us: u32,
+    /// Frames shown per second, times 10. 0 for audio.
+    pub fps_x10: u32,
+    pub target_fps_x10: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Device {
     pub state: State,
     pub readers: usize,
     pub error: Option<String>,
+    /// Only while running with effects.
+    pub load: Option<Load>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gpu {
+    pub uuid: String,
+    pub name: String,
+    /// Why the configured GPU isn't used.
+    pub fallback: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +68,8 @@ pub struct Status {
     pub reload_error: Option<String>,
     /// The config on disk changes settings that only apply after a restart.
     pub restart_pending: bool,
+    /// `None` until a worker first starts, or if nvidia-smi failed.
+    pub gpu: Option<Gpu>,
     pub mic: Device,
     pub speaker: Device,
     pub camera: Device,
@@ -203,10 +229,30 @@ mod tests {
             serde_json::from_str(r#"{"protocol":1,"version":"0.4.0","future":true}"#).unwrap();
         assert_eq!(status.version, "0.4.0");
         assert_eq!(status.mic.state, State::Disabled);
+        assert_eq!(status.camera.load, None);
+        assert_eq!(status.gpu, None);
         let line = serde_json::to_string(&Status::default()).unwrap();
         assert_eq!(
             serde_json::from_str::<Status>(&line).unwrap(),
             Status::default()
         );
+    }
+
+    #[test]
+    fn load_and_gpu_round_trip() {
+        let mut status = Status::default();
+        status.camera.load = Some(Load {
+            busy_us: 27_000,
+            budget_us: 33_333,
+            fps_x10: 598,
+            target_fps_x10: 600,
+        });
+        status.gpu = Some(Gpu {
+            uuid: "GPU-1".into(),
+            name: "NVIDIA GeForce RTX 5080".into(),
+            fallback: Some("the chosen GPU GPU-2 is not present".into()),
+        });
+        let line = serde_json::to_string(&status).unwrap();
+        assert_eq!(serde_json::from_str::<Status>(&line).unwrap(), status);
     }
 }

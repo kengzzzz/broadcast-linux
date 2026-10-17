@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
@@ -14,16 +14,17 @@ use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 
 use crate::config::{AudioEffect, Config, Stage};
+use crate::gpu::Lazy;
 use crate::graph;
-use crate::nvidia::{self, Installation};
+use crate::nvidia::{self, Feature, Installation};
 use crate::paths::Paths;
 use crate::service::{Event, EventSender, LinkEnd};
 use crate::status::{self, State};
-use crate::worker::{Launch, Worker};
+use crate::worker::{self, Launch, Worker};
 
-const RATE: u32 = 48_000;
+pub(crate) const RATE: u32 = 48_000;
 /// Broadcast's audio models all run on fixed 40 ms frames at 48 kHz.
-const FRAME: usize = 1920;
+pub(crate) const FRAME: usize = 1920;
 /// 5.3 ms periods, so the reserve fits in one. `LATENCY` must match `PERIOD`.
 const PERIOD: usize = 256;
 const LATENCY: &str = "256/48000";
@@ -47,8 +48,13 @@ const SLOW_RESERVE: usize = RATE as usize / 100;
 const FAST_TRIPS: u64 = 250;
 const FAST_TRIP: Duration = Duration::from_millis(2);
 const SLOW_TRIP: Duration = Duration::from_millis(3);
+const LOAD_WINDOW: Duration = Duration::from_secs(1);
+/// Older means frames stopped coming back.
+const LOAD_STALE: Duration = Duration::from_millis(2500);
 /// Studio Voice takes up to about 12 ms on every other frame (RTX 5080).
 const STUDIO_VOICE_RESERVE: usize = 3 * PERIOD;
+/// A mic profile makes those frames take up to about 19 ms.
+const MIC_PROFILE_RESERVE: usize = 4 * PERIOD;
 const MAX_RESERVE: usize = 3 * RATE as usize / 50;
 /// Late output grows the reserve by at least this, so a slow GPU costs one gap, not several.
 const RESERVE_STEP: usize = RATE as usize / 100;
@@ -605,31 +611,37 @@ pub struct Settings {
     /// The real device: "default" or a node name.
     pub target: String,
     pub stages: Vec<Stage>,
+    pub profile: Option<u32>,
     pub unload_after: Duration,
     pub name: String,
     pub keep_awake: bool,
+    pub gpu: Lazy,
 }
 
 impl Settings {
-    pub fn mic(config: &Config) -> Self {
+    pub fn mic(config: &Config, gpu: &Lazy) -> Self {
         let mic = &config.mic;
         Self {
             target: mic.input.clone(),
             stages: mic.stages(),
+            profile: mic.profile(),
             unload_after: Duration::from_secs(mic.unload_after_minutes * 60),
             name: mic.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
+            gpu: gpu.clone(),
         }
     }
 
-    pub fn speaker(config: &Config) -> Self {
+    pub fn speaker(config: &Config, gpu: &Lazy) -> Self {
         let speaker = &config.speaker;
         Self {
             target: speaker.output.clone(),
             stages: speaker.stages(),
+            profile: None,
             unload_after: Duration::from_secs(speaker.unload_after_minutes * 60),
             name: speaker.name.clone(),
             keep_awake: config.service.gpu_keep_awake,
+            gpu: gpu.clone(),
         }
     }
 }
@@ -670,6 +682,8 @@ struct Shared {
     active: AtomicBool,
     sent: AtomicU64,
     received: AtomicU64,
+    /// When measured, and the mean processing time per frame in µs.
+    load: Mutex<Option<(Instant, u32)>>,
     /// Usually the reason when a worker fails to start.
     last_line: Mutex<String>,
 }
@@ -770,10 +784,22 @@ impl AudioDevice {
             Some(s) if !s.ready => State::Loading,
             Some(_) => State::Running,
         };
+        let load = self
+            .session
+            .as_ref()
+            .filter(|s| state == State::Running && s.worker.is_some())
+            .and_then(|s| *s.shared.load.lock().unwrap())
+            .filter(|(at, _)| at.elapsed() < LOAD_STALE)
+            .map(|(_, busy_us)| status::Load {
+                busy_us,
+                budget_us: u32::try_from(FRAME * 1_000_000 / RATE as usize).unwrap_or(u32::MAX),
+                ..status::Load::default()
+            });
         status::Device {
             state,
             readers: self.readers.len(),
             error: self.last_error.clone(),
+            load,
         }
     }
 
@@ -958,25 +984,7 @@ impl AudioDevice {
         }
 
         let install = Installation::find(paths)?;
-        let mut args = vec![u8::from(self.settings.keep_awake).to_string()];
-        for stage in &self.settings.stages {
-            let (folder, file) = stage.effect.model();
-            args.extend([
-                stage.effect.selector().to_owned(),
-                nvidia::windows_path(&install.model(folder, file)?),
-                stage.strength.to_string(),
-            ]);
-        }
-        let reserve = if self
-            .settings
-            .stages
-            .iter()
-            .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency)
-        {
-            STUDIO_VOICE_RESERVE
-        } else {
-            RESERVE
-        };
+        let (args, reserve) = self.worker_args(&install)?;
         let (in_prod, in_cons) = HeapRb::<Frame>::new(QUEUE).split();
         let (out_prod, out_cons) = HeapRb::<Frame>::new(QUEUE).split();
         self.rt
@@ -989,6 +997,7 @@ impl AudioDevice {
             cwd: install.runtime.clone(),
             args,
             stdin: None,
+            gpu: self.settings.gpu.get(),
         })?;
         let stdin = pipes.stdin.context("worker stdin")?;
 
@@ -1034,6 +1043,28 @@ impl AudioDevice {
             shared,
             ready: false,
         })
+    }
+
+    /// Also returns the output reserve the effects need.
+    fn worker_args(&self, install: &Installation) -> Result<(Vec<String>, usize)> {
+        let stages = &self.settings.stages;
+        let args = worker_args(
+            install,
+            stages,
+            self.settings.profile,
+            Some(self.settings.keep_awake),
+        )?;
+        let studio_voice = stages
+            .iter()
+            .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency);
+        let reserve = if studio_voice && self.settings.profile.is_some() {
+            MIC_PROFILE_RESERVE
+        } else if studio_voice {
+            STUDIO_VOICE_RESERVE
+        } else {
+            RESERVE
+        };
+        Ok((args, reserve))
     }
 
     fn session_stream(&self, target: &str) -> Result<Stream> {
@@ -1233,6 +1264,44 @@ fn playback_process(stream: &pw::stream::Stream, rt: &Rt) {
     *chunk.size_mut() = u32::try_from(n * 4).unwrap_or(0);
 }
 
+/// `profile` only applies to Studio Voice. `keep_awake` is `None` for files, which the
+/// worker reads whole, as fast as it can.
+pub fn worker_args(
+    install: &Installation,
+    stages: &[Stage],
+    profile: Option<u32>,
+    keep_awake: Option<bool>,
+) -> Result<Vec<String>> {
+    let studio_voice = stages
+        .iter()
+        .any(|stage| stage.effect == AudioEffect::StudioVoiceLowLatency);
+    let mut args = Vec::new();
+    if let Some(id) = profile.filter(|_| studio_voice) {
+        if let Some(reason) = install.missing(Feature::MicProfiles) {
+            bail!(reason);
+        }
+        let (folder, file) = nvidia::MIC_PROFILES;
+        args.extend([
+            "--profile".into(),
+            nvidia::windows_path(&install.model(folder, file)?),
+            id.to_string(),
+        ]);
+    }
+    match keep_awake {
+        Some(keep_awake) => args.push(u8::from(keep_awake).to_string()),
+        None => args.extend(["--offline".into(), "0".into()]),
+    }
+    for stage in stages {
+        let (folder, file) = stage.effect.model();
+        args.extend([
+            stage.effect.selector().to_owned(),
+            nvidia::windows_path(&install.model(folder, file)?),
+            stage.strength.to_string(),
+        ]);
+    }
+    Ok(args)
+}
+
 fn chain_name(stages: &[Stage]) -> String {
     let names: Vec<_> = stages.iter().map(|s| s.effect.selector()).collect();
     if names.is_empty() {
@@ -1251,7 +1320,7 @@ fn watch_stderr(
     session: u64,
 ) {
     let mut failed = false;
-    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+    for line in worker::log_lines(stderr) {
         eprintln!("{} worker: {line}", kind.label());
         if !failed {
             line.clone_into(&mut shared.last_line.lock().unwrap());
@@ -1351,6 +1420,8 @@ fn drain_worker(
     // Bytes at the front of `buf` left over from a read that split a sample.
     let mut carry = 0;
     let mut frame = Frame::EMPTY;
+    let (mut busy, mut runs, mut measured) = (Duration::ZERO, 0u32, Instant::now());
+    let mut last_done: Option<Instant> = None;
     'read: loop {
         let n = match stdout.read(&mut buf[carry..]) {
             Ok(0) | Err(_) => break,
@@ -1365,11 +1436,22 @@ fn drain_worker(
                     break 'read;
                 };
                 frame.index = index;
-                let trip = sent.elapsed();
+                let done = Instant::now();
+                let trip = done - sent;
                 if trip > SLOW_TRIP {
                     rt.fast_trips.store(0, Ordering::Relaxed);
                 } else if trip <= FAST_TRIP {
                     rt.fast_trips.fetch_add(1, Ordering::Relaxed);
+                }
+                // A frame queued behind another starts when that one ends, as in `Pace`.
+                busy +=
+                    done.saturating_duration_since(last_done.map_or(sent, |last| sent.max(last)));
+                last_done = Some(done);
+                runs += 1;
+                if measured.elapsed() >= LOAD_WINDOW {
+                    let mean = u32::try_from((busy / runs).as_micros()).unwrap_or(u32::MAX);
+                    *shared.load.lock().unwrap() = Some((Instant::now(), mean));
+                    (busy, runs, measured) = (Duration::ZERO, 0, Instant::now());
                 }
                 if ring.try_push(frame).is_err() {
                     rt.stats.dropped_frames.fetch_add(1, Ordering::Relaxed);

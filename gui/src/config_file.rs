@@ -261,6 +261,7 @@ mod tests {
             ("camera.eyes", |c| c.camera.eye_contact.enabled = true),
             ("service.idle", |c| c.service.idle_timeout_seconds = 0),
             ("service.awake", |c| c.service.gpu_keep_awake = false),
+            ("service.gpu", |c| c.service.gpu = Some("GPU-1".into())),
             ("camera.preset only", |c| {
                 c.camera.studio_light.preset = LightPreset::Warm;
             }),

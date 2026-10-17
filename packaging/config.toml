@@ -14,7 +14,9 @@ noise_removal = { enabled = true, strength = 1.0 }
 # Echo removal; combined with noise removal at the higher strength.
 room_echo_removal = { enabled = false, strength = 1.0 }
 # Studio mic voice; overrides noise/echo removal. No strength option.
-studio_voice = { enabled = false }
+# profile: "default" | "bright" | "full" | "warm". Profiles add about 30 ms of delay
+# and need NVIDIA Broadcast 2.3.0.
+studio_voice = { enabled = false, profile = "default" }
 # Whole minutes to retain the idle mic model after pausing; 0 = unload on pause.
 # With gpu_keep_awake, the model runs on silence until then.
 unload_after_minutes = 2
@@ -67,6 +69,13 @@ studio_light = { enabled = false, strength = 1.0, preset = "neutral" }
 eye_contact = { enabled = false }
 # Zoom in and follow your face as you move. No strength option.
 auto_frame = { enabled = false }
+# Capture smaller and upscale to width x height with AI. Needs an RTX 30 series or newer.
+# mode: "quality" | "performance".
+super_resolution = { enabled = false, mode = "quality" }
+# Capture at fps / multiplier and make the frames in between with AI. Needs an RTX 40
+# series or newer. multiplier: 2 | 3 | 4, dividing fps. Adds multiplier - 1 frames of delay.
+# mode: "performance" | "balanced" | "quality".
+frame_generation = { enabled = false, mode = "balanced", multiplier = 2 }
 
 [service]
 # Whole seconds after last reader: pause mic / stop camera; 0 = immediately.
@@ -74,3 +83,6 @@ idle_timeout_seconds = 5
 # Keep the GPU awake while a mic or speaker model is loaded, for fewer short gaps.
 # false saves some GPU power.
 gpu_keep_awake = true
+# GPU UUID from `nvidia-smi -L`. Omit for the first supported GPU.
+# A GPU of another generation needs `broadcast-linux setup` again.
+# gpu = "GPU-01234567-89ab-cdef-0123-456789abcdef"

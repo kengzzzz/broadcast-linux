@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{AudioEffect, LightPreset};
+use crate::gpu::{Chosen, Generation};
 use crate::paths::Paths;
 
 pub const BACKGROUND_MODELS: &str = "nvbcast_vfx_gs_v0_9";
@@ -11,11 +12,57 @@ pub const VIDEO_DENOISE_MODELS: &str = "nvbcast_vfx_lld_v0_9";
 pub const EYE_CONTACT_MODELS: &str = "nvbcast_ar_gw_v0_9";
 pub const FACE_DETECTION_MODELS: &str = "nvbcast_ar_fd_v0_9";
 pub const STUDIO_LIGHT_MODELS: &str = "nvbcast_vfx_rl_v0_9";
+pub const MIC_PROFILES: (&str, &str) = (
+    "nvbcast_afx_stdvoice_v0_9",
+    "studio_voice_mic_profiles_48k.trtpkg",
+);
+
+/// Effects that NVIDIA leaves out of older builds and of some GPUs' packages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    SuperResolution,
+    FrameGeneration,
+    MicProfiles,
+}
+
+impl Feature {
+    pub const ALL: [Self; 3] = [
+        Self::SuperResolution,
+        Self::FrameGeneration,
+        Self::MicProfiles,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SuperResolution => "RTX Video Super Resolution",
+            Self::FrameGeneration => "RTX Video Frame Generation",
+            Self::MicProfiles => "Studio Voice mic profiles",
+        }
+    }
+
+    fn runtime_files(self) -> &'static [&'static str] {
+        match self {
+            Self::SuperResolution => &["nvVFXVideoSuperRes.dll", "nvngx_vsr.dll"],
+            Self::FrameGeneration => &["nvVFXVideoFrameGeneration.dll"],
+            Self::MicProfiles => &[],
+        }
+    }
+
+    /// NVIDIA's stated minimum, which matches the packages that ship the files.
+    fn gpus(self) -> &'static str {
+        match self {
+            Self::SuperResolution => "an RTX 30 series or newer GPU",
+            Self::FrameGeneration => "an RTX 40 series or newer GPU",
+            Self::MicProfiles => "NVIDIA Broadcast 2.3.0",
+        }
+    }
+}
 
 pub struct Installation {
     pub runtime: PathBuf,
     models: PathBuf,
     studio_light: PathBuf,
+    build: PathBuf,
 }
 
 impl Installation {
@@ -31,7 +78,73 @@ impl Installation {
             runtime,
             models,
             studio_light: build.join(crate::setup::STUDIO_LIGHT_DIR),
+            build,
         })
+    }
+
+    /// Why `feature` can't run with these files, or `None` when it can.
+    pub fn missing(&self, feature: Feature) -> Option<String> {
+        if self.has_files(feature) {
+            let no_ngx = feature == Feature::SuperResolution && crate::gpu::ngx_dir().is_none();
+            return no_ngx.then(|| crate::gpu::NO_NGX.into());
+        }
+        Some(if self.build.ends_with(crate::setup::BUILD) {
+            format!(
+                "{} needs {}; NVIDIA's files for this GPU don't include it",
+                feature.label(),
+                feature.gpus()
+            )
+        } else {
+            format!(
+                "{} needs NVIDIA Broadcast {}; run `broadcast-linux setup` to install it",
+                feature.label(),
+                crate::setup::BUILD
+            )
+        })
+    }
+
+    /// Why the video effects can't run on `gpu`: their engines are per generation. Unknown
+    /// markers don't block.
+    pub fn wrong_generation(&self, gpu: &Chosen) -> Option<String> {
+        let installed = self.generation()?;
+        let known = Generation::ALL
+            .into_iter()
+            .find(|generation| generation.to_string() == installed)?;
+        (known != gpu.generation).then(|| {
+            format!(
+                "NVIDIA's files are for {installed}, but the effects run on {} ({}); run `broadcast-linux setup`",
+                gpu.gpu.name, gpu.generation
+            )
+        })
+    }
+
+    /// From the `.complete` marker setup writes.
+    pub fn generation(&self) -> Option<String> {
+        let complete = fs::read_to_string(self.build.join(".complete")).ok()?;
+        Some(complete.trim().to_owned())
+    }
+
+    /// The build in use, if older than the pinned one.
+    pub fn older_build(&self) -> Option<String> {
+        if self.build.ends_with(crate::setup::BUILD) {
+            return None;
+        }
+        Some(self.build.file_name()?.to_string_lossy().into_owned())
+    }
+
+    /// True when the build in use is older and lacks `feature`.
+    pub fn needs_setup(&self, feature: Feature) -> bool {
+        self.older_build().is_some() && !self.has_files(feature)
+    }
+
+    fn has_files(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::MicProfiles => self.model(MIC_PROFILES.0, MIC_PROFILES.1).is_ok(),
+            _ => feature
+                .runtime_files()
+                .iter()
+                .all(|file| self.runtime.join(file).is_file()),
+        }
     }
 
     /// Fails on the first asset a worker could load but cannot find.
@@ -160,6 +273,76 @@ mod tests {
         complete("99.0.0.1");
         complete(crate::setup::BUILD);
         assert_eq!(installed_build(&dir), Some(dir.join(crate::setup::BUILD)));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn older_builds_need_setup_for_new_effects() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-features-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("runtime")).unwrap();
+        let install = |build: &str| Installation {
+            runtime: dir.join("runtime"),
+            models: dir.join("models"),
+            studio_light: dir.join("light"),
+            build: dir.join(build),
+        };
+        let old = install("2.2.1.58338310");
+        assert_eq!(old.older_build().as_deref(), Some("2.2.1.58338310"));
+        assert!(old.needs_setup(Feature::FrameGeneration));
+        assert!(old.needs_setup(Feature::MicProfiles));
+        fs::write(dir.join("runtime/nvVFXVideoFrameGeneration.dll"), "").unwrap();
+        assert!(
+            !old.needs_setup(Feature::FrameGeneration),
+            "an older build with it"
+        );
+
+        let pinned = install(crate::setup::BUILD);
+        assert_eq!(pinned.older_build(), None);
+        assert!(!pinned.needs_setup(Feature::SuperResolution));
+        assert!(pinned.missing(Feature::SuperResolution).is_some());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn blocks_video_only_for_a_known_other_generation() {
+        let dir =
+            std::env::temp_dir().join(format!("broadcast-linux-generation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let install = Installation {
+            runtime: dir.join("runtime"),
+            models: dir.join("models"),
+            studio_light: dir.join("light"),
+            build: dir.clone(),
+        };
+        let chosen = crate::gpu::Chosen {
+            gpu: crate::gpu::Gpu {
+                uuid: "GPU-1".into(),
+                name: "NVIDIA GeForce RTX 5080".into(),
+                pci_bus: "00000000:01:00.0".into(),
+                compute_capability: "12.0".into(),
+                generation: Some(Generation::Blackwell),
+            },
+            generation: Generation::Blackwell,
+            fallback: None,
+            others: false,
+        };
+        assert_eq!(install.wrong_generation(&chosen), None, "no marker");
+        for (marker, blocks) in [
+            ("Blackwell\n", false),
+            ("Ada\n", true),
+            ("\n", false),
+            ("x", false),
+        ] {
+            fs::write(dir.join(".complete"), marker).unwrap();
+            assert_eq!(
+                install.wrong_generation(&chosen).is_some(),
+                blocks,
+                "{marker:?}"
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

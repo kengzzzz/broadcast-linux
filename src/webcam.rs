@@ -9,13 +9,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::config::{InputColor, InputFormat};
-use crate::v4l2::{self, PixFormat};
+use crate::v4l2::{self, PixFormat, StreamParm};
 
 const VIDIOC_QUERYCAP: libc::c_ulong = 0x8068_5600;
 const VIDIOC_G_FMT: libc::c_ulong = 0xC0D0_5604;
 const VIDIOC_ENUM_FMT: libc::c_ulong = 0xC040_5602;
 const VIDIOC_ENUM_FRAMESIZES: libc::c_ulong = 0xC02C_564A;
-const VIDIOC_S_PARM: libc::c_ulong = 0xC0CC_5616;
 const VIDIOC_REQBUFS: libc::c_ulong = 0xC014_5608;
 const VIDIOC_QUERYBUF: libc::c_ulong = 0xC058_5609;
 const VIDIOC_QBUF: libc::c_ulong = 0xC058_560F;
@@ -64,13 +63,6 @@ struct FrmSizeEnum {
     type_: u32,
     size: [u32; 6],
     reserved: [u32; 2],
-}
-
-/// `struct v4l2_streamparm` for capture: `parm[2..4]` is timeperframe.
-#[repr(C)]
-struct StreamParm {
-    type_: u32,
-    parm: [u32; 50],
 }
 
 #[repr(C)]
@@ -380,6 +372,23 @@ impl Webcam {
     pub fn format_for(&self, wanted: InputFormat, width: u32, height: u32) -> Option<Format> {
         find(&self.formats, wanted, width, height)
     }
+
+    pub fn upscale_source(
+        &self,
+        wanted: InputFormat,
+        width: u32,
+        height: u32,
+    ) -> Option<(u32, u32)> {
+        upscale_source(&self.formats, wanted, width, height)
+    }
+
+    /// Common sizes Super Resolution can upscale to, largest first.
+    pub fn upscaled_sizes(&self, wanted: InputFormat) -> Vec<(u32, u32)> {
+        COMMON_SIZES
+            .into_iter()
+            .filter(|&(w, h)| self.upscale_source(wanted, w, h).is_some())
+            .collect()
+    }
 }
 
 /// Sizes offered when a webcam reports a range instead of a list.
@@ -445,6 +454,47 @@ pub fn capture_size(path: &str) -> Result<(u32, u32)> {
     Ok((format.pix.width, format.pix.height))
 }
 
+/// The largest capture size with the shape of `width`x`height` that is smaller in both
+/// directions, for Super Resolution to upscale.
+pub fn smaller_size(
+    input: &str,
+    wanted: InputFormat,
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32)> {
+    let formats = list_formats(&open(input)?);
+    upscale_source(&formats, wanted, width, height).with_context(|| {
+        format!(
+            "{input} has no {} size smaller than {width}x{height} with the same shape for Super Resolution",
+            wanted.label()
+        )
+    })
+}
+
+fn upscale_source(
+    formats: &[(Format, Sizes)],
+    wanted: InputFormat,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    let same_shape = |w: u32, h: u32| {
+        let (a, b) = (
+            u64::from(w) * u64::from(height),
+            u64::from(h) * u64::from(width),
+        );
+        a.abs_diff(b) * 100 <= a
+    };
+    formats
+        .iter()
+        .flat_map(|(_, sizes)| match sizes {
+            Sizes::Discrete(list) => list.clone(),
+            Sizes::Range(_) => COMMON_SIZES.to_vec(),
+        })
+        .filter(|&(w, h)| w < width && h < height && same_shape(w, h))
+        .filter(|&(w, h)| find(formats, wanted, w, h).is_some())
+        .max_by_key(|&(w, h)| u64::from(w) * u64::from(h))
+}
+
 /// Picks the capture format for the webcam at `width`x`height`.
 pub fn choose(input: &str, wanted: InputFormat, width: u32, height: u32) -> Result<Format> {
     let formats = list_formats(&open(input)?);
@@ -487,49 +537,66 @@ fn find(
     })
 }
 
-fn set_fps(file: &File, input: &str, format: Format, (width, height): (u32, u32), fps: u32) {
+/// Returns the driver's frame interval, if it reports one.
+fn set_fps(
+    file: &File,
+    input: &str,
+    format: Format,
+    (width, height): (u32, u32),
+    fps: u32,
+) -> Option<Duration> {
     let mut parm = StreamParm {
         type_: BUF_TYPE_VIDEO_CAPTURE,
         parm: [0; 50],
     };
     parm.parm[2] = 1;
     parm.parm[3] = fps;
-    if let Err(e) = ioctl(file, VIDIOC_S_PARM, &mut parm) {
+    if let Err(e) = ioctl(file, v4l2::VIDIOC_S_PARM, &mut parm) {
         eprintln!("camera: {input} did not accept {fps} fps: {e}");
-        return;
-    }
-    if parm.parm[0] & CAP_TIMEPERFRAME == 0 {
-        return;
-    }
-    if let Some(actual) = slower_fps(parm.parm[2], parm.parm[3], fps) {
-        let mjpeg = format != Format::Mjpeg
-            && find(&list_formats(file), InputFormat::Mjpeg, width, height).is_some();
-        let hint = if mjpeg {
-            "MJPEG or a smaller size may be faster"
-        } else {
-            "a smaller size may be faster"
-        };
-        eprintln!(
-            "camera: {input} gives only {actual} fps as {} at {width}x{height}, not {fps}; {hint}",
-            format.label()
-        );
-    }
-}
-
-/// The frame rate the driver set, as text, when it is under 90% of `wanted`.
-fn slower_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<String> {
-    if numerator == 0
-        || denominator == 0
-        || u64::from(denominator) * 10 >= u64::from(wanted) * u64::from(numerator) * 9
-    {
         return None;
     }
-    let tenths = (u64::from(denominator) * 10 + u64::from(numerator) / 2) / u64::from(numerator);
-    Some(if tenths % 10 == 0 {
+    if parm.parm[0] & CAP_TIMEPERFRAME == 0 {
+        return None;
+    }
+    let interval = (parm.parm[2] > 0 && parm.parm[3] > 0)
+        .then(|| Duration::from_secs(u64::from(parm.parm[2])) / parm.parm[3]);
+    let Some((actual, slow)) = other_fps(parm.parm[2], parm.parm[3], fps) else {
+        return interval;
+    };
+    let hint = if !slow {
+        ""
+    } else if format != Format::Mjpeg
+        && find(&list_formats(file), InputFormat::Mjpeg, width, height).is_some()
+    {
+        "; MJPEG or a smaller size may be faster"
+    } else {
+        "; a smaller size may be faster"
+    };
+    eprintln!(
+        "camera: {input} gives {actual} fps as {} at {width}x{height}, not {fps}{hint}",
+        format.label()
+    );
+    interval
+}
+
+/// The driver's rate as text when it is over 2% off `wanted`, and whether it is under 90%.
+/// Webcams round low rates, for example 6 to 7.5.
+fn other_fps(numerator: u32, denominator: u32, wanted: u32) -> Option<(String, bool)> {
+    let (num, den, wanted) = (
+        u64::from(numerator),
+        u64::from(denominator),
+        u64::from(wanted),
+    );
+    if num == 0 || den == 0 || (den * 50).abs_diff(wanted * num * 50) <= wanted * num {
+        return None;
+    }
+    let tenths = (den * 10 + num / 2) / num;
+    let text = if tenths % 10 == 0 {
         format!("{}", tenths / 10)
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
-    })
+    };
+    Some((text, den * 10 < wanted * num * 9))
 }
 
 struct Mapping {
@@ -542,6 +609,7 @@ pub struct Capture {
     buffers: Vec<Mapping>,
     color: Color,
     captured: Option<Instant>,
+    interval: Option<Duration>,
 }
 
 // SAFETY: the mappings belong to this Capture alone and are only touched through &mut self.
@@ -600,7 +668,7 @@ impl Capture {
             );
         }
 
-        set_fps(&file, input, format, (width, height), fps);
+        let interval = set_fps(&file, input, format, (width, height), fps);
 
         let mut request = RequestBuffers {
             count: BUFFERS,
@@ -616,6 +684,7 @@ impl Capture {
             buffers: Vec::new(),
             color: Color::reported(&pix),
             captured: None,
+            interval,
         };
         for index in 0..request.count {
             let mut buf = Buffer::mmap(index);
@@ -644,6 +713,10 @@ impl Capture {
         let mut kind = BUF_TYPE_VIDEO_CAPTURE;
         ioctl(&capture.file, VIDIOC_STREAMON, &mut kind).map_err(|e| busy_or(input, &e))?;
         Ok(capture)
+    }
+
+    pub fn interval(&self) -> Option<Duration> {
+        self.interval
     }
 
     pub fn reported_color(&self) -> Color {
@@ -816,7 +889,6 @@ mod tests {
         assert_eq!(size_of::<Capability>(), 104);
         assert_eq!(size_of::<FmtDesc>(), 64);
         assert_eq!(size_of::<FrmSizeEnum>(), 44);
-        assert_eq!(size_of::<StreamParm>(), 204);
         assert_eq!(size_of::<RequestBuffers>(), 20);
         assert_eq!(size_of::<Buffer>(), 88);
         assert_eq!(std::mem::offset_of!(Buffer, offset), 64);
@@ -880,14 +952,16 @@ mod tests {
     }
 
     #[test]
-    fn reports_slower_frame_rates() {
-        assert_eq!(slower_fps(1, 5, 30).as_deref(), Some("5"));
-        assert_eq!(slower_fps(2, 15, 30).as_deref(), Some("7.5"));
-        assert_eq!(slower_fps(1001, 30000, 30), None);
-        assert_eq!(slower_fps(1, 30, 30), None);
-        assert_eq!(slower_fps(1, 60, 30), None);
-        assert_eq!(slower_fps(0, 0, 30), None);
-        assert_eq!(slower_fps(1, 0, 30), None);
+    fn reports_other_frame_rates() {
+        assert_eq!(other_fps(1, 5, 30), Some(("5".into(), true)));
+        assert_eq!(other_fps(2, 15, 30), Some(("7.5".into(), true)));
+        assert_eq!(other_fps(2, 15, 8), Some(("7.5".into(), false)));
+        assert_eq!(other_fps(2, 15, 6), Some(("7.5".into(), false)));
+        assert_eq!(other_fps(1, 60, 30), Some(("60".into(), false)));
+        assert_eq!(other_fps(1001, 30000, 30), None);
+        assert_eq!(other_fps(1, 30, 30), None);
+        assert_eq!(other_fps(0, 0, 30), None);
+        assert_eq!(other_fps(1, 0, 30), None);
     }
 
     #[test]

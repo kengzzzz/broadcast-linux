@@ -2,9 +2,23 @@
 
 ## Unreleased
 
-The log names the apps that use the mic or speaker.
+NVIDIA Broadcast 2.3.0: mic profiles, RTX Video Super Resolution and Frame Generation, and a File Processor.
 
+- Setup: NVIDIA Broadcast 2.3.0. Run `broadcast-linux setup` after upgrading. It downloads about 2.4 GB, asks for NVIDIA's licence again and removes the 2.2.1 files, which the service uses until then.
+- Camera: our own background blur, since Broadcast 2.3.0 dropped NVIDIA's. It matches NVIDIA's look and also works with the 2.2.1 files.
+- Camera: Eye Contact is about twice as fast (RTX 5080, 1080p).
+- Settings window: a new layout like NVIDIA Broadcast on Windows, with Audio, Video, Files and Settings pages. Options open under each effect, the preview sits beside the camera effects, narrow windows get one column, and it follows the system theme.
 - Mic and speaker: the log names the apps reading them, for example `mic: 1 app(s) reading (vesktop)`.
+- Mic: Studio Voice mic profiles Bright, Full and Warm (`studio_voice.profile`). A profile adds about 30 ms of delay.
+- Camera: RTX Video Super Resolution (`super_resolution`) captures smaller and upscales with AI. Needs an RTX 30 series or newer.
+- Camera: RTX Video Frame Generation (`frame_generation`) makes the frames in between with AI, for example 60 fps from a 30 fps webcam. Needs an RTX 40 series or newer.
+- File Processor: the effects on video and audio files, on the Files page or with `broadcast-linux process`. Needs ffmpeg, now a suggested package.
+- Settings window: a mic profile picker, and Super Resolution and Frame Generation rows that say why they are unavailable.
+- `doctor`: new `rtx video` and `ffmpeg` items.
+- Camera: a new size no longer stops the camera while an app uses it. The app gets a black picture until it closes the camera, then the new size applies.
+- Settings window: a GPU load bar, like NVIDIA Broadcast's. It shows the effects' time per frame against the time between frames, the camera's frame rate and whole-GPU use.
+- Several GPUs: pick the GPU for the effects in Settings (`[service] gpu`). All effects run on one GPU, also in Automatic, which takes the first supported one. A GTX card listed first no longer stops setup.
+- Mic, speaker and camera: the log names the GPU each worker runs on.
 
 ## 0.4.4 - 2026-10-12
 

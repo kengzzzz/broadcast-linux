@@ -1,0 +1,24 @@
+diff --git a/dlls/nvcuda/nvcuda.c b/dlls/nvcuda/nvcuda.c
+index 5aedd73..9d093a3 100644
+--- a/dlls/nvcuda/nvcuda.c
++++ b/dlls/nvcuda/nvcuda.c
+@@ -6633,6 +6633,19 @@ static void get_addr(const char* symbol, int driverVersion, size_t flags, void**
+         }
+     }
+ 
++    /* The driver returns the newest variant not newer than driverVersion. NGX asks for
++     * cuArrayCreate at 12080, for example, and fails if it gets nothing. */
++    if (bestMapping == NULL)
++    {
++        for (size_t i = 0; i < mappings_count; ++i)
++        {
++            const FunctionMapping* mapping = &mappings[i];
++            if (strcmp(mapping->symbol, symbol) == 0 && mapping->minVersion <= driverVersion && flags == mapping->flags
++                && (bestMapping == NULL || mapping->minVersion > bestMapping->minVersion))
++                bestMapping = mapping;
++        }
++    }
++
+     if (bestMapping != NULL)
+     {
+         *pfn = bestMapping->function;

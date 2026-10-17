@@ -7,15 +7,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 use broadcast_linux::config::{self, Config};
 use broadcast_linux::doctor::{self, Report};
+use broadcast_linux::gpu::{self, Chosen, Gpu};
 use broadcast_linux::graph::AudioNode;
+use broadcast_linux::nvidia::{Feature, Installation};
 use broadcast_linux::paths::Paths;
 use broadcast_linux::status::{Device, State, Status};
 use broadcast_linux::webcam::{self, Webcam};
-use broadcast_linux::{VERSION, gpu, setup, v4l2};
+use broadcast_linux::{VERSION, setup, v4l2};
 use eframe::egui;
 
 use crate::config_file::{ChangedOnDisk, ConfigFile};
 use crate::devices;
+use crate::files::Files;
+use crate::gpu_bar::WholeGpu;
 use crate::preview::Preview;
 use crate::service::{self, Link};
 use crate::setup_task::{Outcome, SetupTask};
@@ -23,10 +27,17 @@ use crate::{pages, theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Audio,
+    Video,
+    Files,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Endpoint {
     Mic,
     Speaker,
     Camera,
-    Setup,
 }
 
 pub struct Message {
@@ -36,10 +47,17 @@ pub struct Message {
 
 /// Gathered off the UI thread.
 pub struct Checks {
-    pub gpu: Result<String, String>,
+    /// From the saved config, not the draft.
+    pub gpu: Result<Chosen, String>,
+    pub gpus: Vec<Gpu>,
+    /// Generation of the installed NVIDIA files.
+    pub installed_for: Option<String>,
     /// Why setup must run, if it must.
     pub setup_needed: Option<String>,
     pub report: Report,
+    /// Effects the installed files can't run, with the reason.
+    pub missing: Vec<(Feature, String)>,
+    pub older_build: Option<String>,
 }
 
 pub struct App {
@@ -53,11 +71,13 @@ pub struct App {
     pub service: Arc<ServiceState>,
     pub checks: Option<Checks>,
     checks_task: Option<Receiver<Checks>>,
+    /// Requested while a check ran, which may have read an older config.
+    recheck: bool,
     pub sources: Vec<AudioNode>,
     pub sinks: Vec<AudioNode>,
     pub default_source: Option<String>,
     pub webcams: Vec<Webcam>,
-    /// The virtual camera's label, or what to fix; `None` until the Camera page checks it.
+    /// The virtual camera's label, or what to fix. `None` until the Video page checks.
     pub loopback: Option<Result<String, v4l2::Hint>>,
     task: Option<(String, Receiver<Result<String, String>>)>,
     pub message: Option<Message>,
@@ -68,6 +88,8 @@ pub struct App {
     picker: Option<Receiver<Option<String>>>,
     /// Saved, but the service has not taken it yet; `true` when that needs a restart.
     unapplied: Option<bool>,
+    pub files: Files,
+    pub whole_gpu: WholeGpu,
 }
 
 /// Refreshed every few seconds on a background thread.
@@ -130,9 +152,10 @@ impl App {
                 }
             }
         });
+        let link = Link::start(ctx.clone());
         let mut app = Self {
-            page: Page::Mic,
-            link: Link::start(ctx.clone()),
+            page: Page::Audio,
+            link: link.clone(),
             config_seen: modified(&paths),
             paths,
             file,
@@ -141,6 +164,7 @@ impl App {
             service,
             checks: None,
             checks_task: None,
+            recheck: false,
             sources: Vec::new(),
             sinks: Vec::new(),
             default_source: None,
@@ -154,6 +178,8 @@ impl App {
             journal: None,
             picker: None,
             unapplied: None,
+            files: Files::default(),
+            whole_gpu: WholeGpu::start(ctx.clone(), link.clone()),
         };
         app.run_checks(ctx);
         app.refresh_devices();
@@ -218,13 +244,12 @@ impl App {
         }
     }
 
-    pub fn device(&self, kind: Page) -> Option<Device> {
+    pub fn device(&self, endpoint: Endpoint) -> Option<Device> {
         let status = self.status()?;
-        Some(match kind {
-            Page::Mic => status.mic,
-            Page::Speaker => status.speaker,
-            Page::Camera => status.camera,
-            Page::Setup => return None,
+        Some(match endpoint {
+            Endpoint::Mic => status.mic,
+            Endpoint::Speaker => status.speaker,
+            Endpoint::Camera => status.camera,
         })
     }
 
@@ -232,14 +257,15 @@ impl App {
         if page == self.page {
             return;
         }
-        if page != Page::Camera {
+        if page != Page::Video {
             self.preview = None;
         }
         self.page = page;
         match page {
-            Page::Mic | Page::Speaker => self.refresh_devices(),
-            Page::Camera => self.refresh_camera(),
-            Page::Setup => self.run_checks(ctx),
+            Page::Audio => self.refresh_devices(),
+            Page::Video => self.refresh_camera(),
+            Page::Files => self.files.opened(),
+            Page::Settings => self.run_checks(ctx),
         }
     }
 
@@ -257,21 +283,49 @@ impl App {
 
     pub fn run_checks(&mut self, ctx: &egui::Context) {
         if self.checks_task.is_some() {
+            self.recheck = true;
             return;
         }
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let paths = Paths::new().expect("HOME is set");
         thread::spawn(move || {
-            let gpu = gpu::detect().map_err(|e| format!("{e:#}"));
+            let gpus = gpu::list().map_err(|e| format!("{e:#}"));
+            let wanted = Config::load(&paths.config)
+                .ok()
+                .and_then(|config| config.service.gpu);
+            let gpu = gpus.as_ref().map_err(Clone::clone).and_then(|gpus| {
+                gpu::choose(gpus, wanted.as_deref()).map_err(|e| format!("{e:#}"))
+            });
             let setup_needed = match &gpu {
                 Ok(gpu) => setup::needed(&paths, gpu.generation),
                 Err(e) => Some(e.clone()),
             };
+            let install = Installation::find(&paths).ok();
+            let missing = install.as_ref().map_or_else(Vec::new, |install| {
+                Feature::ALL
+                    .into_iter()
+                    .filter_map(|feature| {
+                        let reason = if install.needs_setup(feature) {
+                            format!(
+                                "Needs NVIDIA Broadcast {}. Click “Download and install” in Settings.",
+                                release(setup::BUILD)
+                            )
+                        } else {
+                            install.missing(feature)?
+                        };
+                        Some((feature, reason))
+                    })
+                    .collect()
+            });
             let checks = Checks {
-                gpu: gpu.map(|g| format!("{} ({})", g.name, g.generation)),
+                gpu,
+                gpus: gpus.unwrap_or_default(),
+                installed_for: install.as_ref().and_then(Installation::generation),
                 setup_needed,
                 report: doctor::check(&paths),
+                missing,
+                older_build: install.as_ref().and_then(Installation::older_build),
             };
             let _ = tx.send(checks);
             ctx.request_repaint();
@@ -285,6 +339,27 @@ impl App {
 
     pub fn setup_needed(&self) -> Option<&str> {
         self.checks.as_ref()?.setup_needed.as_deref()
+    }
+
+    pub fn gpu_fallback(&self) -> bool {
+        self.checks
+            .as_ref()
+            .is_some_and(|checks| checks.gpu.as_ref().is_ok_and(|gpu| gpu.fallback.is_some()))
+    }
+
+    /// The older release in use, when setup only has to update NVIDIA's files.
+    pub fn update_from(&self) -> Option<&str> {
+        let checks = self.checks.as_ref()?;
+        checks.setup_needed.as_ref()?;
+        checks.gpu.as_ref().ok()?;
+        checks.older_build.as_deref().map(release)
+    }
+
+    /// Why `feature` can't run. `None` also until the checks finish.
+    pub fn missing(&self, feature: Feature) -> Option<String> {
+        let checks = self.checks.as_ref()?;
+        let (_, reason) = checks.missing.iter().find(|(f, _)| *f == feature)?;
+        Some(reason.clone())
     }
 
     pub fn spawn(
@@ -304,7 +379,21 @@ impl App {
     }
 
     pub fn apply(&mut self, overwrite: bool, ctx: &egui::Context) {
+        // The service would refuse the whole file.
+        if let Err(e) = self.draft.camera.validate() {
+            self.fail(format!("{e:#}"));
+            return;
+        }
         let restart = self.restart_needed();
+        let camera = &self.draft.camera;
+        let resized = self.saved().is_some_and(|saved| {
+            (saved.camera.width, saved.camera.height) != (camera.width, camera.height)
+        });
+        let camera_in_use = self
+            .device(Endpoint::Camera)
+            .is_some_and(|camera| camera.readers > 0);
+        let gpu_changed =
+            self.saved().map(|saved| &saved.service.gpu) != Some(&self.draft.service.gpu);
         let Ok(file) = &mut self.file else {
             return;
         };
@@ -318,6 +407,9 @@ impl App {
         }
         self.config_seen = modified(&self.paths);
         self.changed_on_disk = false;
+        if gpu_changed {
+            self.run_checks(ctx);
+        }
         if !self.service.active() {
             self.unapplied = None;
             self.note("Saved. The service is not running, so nothing changed yet.");
@@ -330,7 +422,13 @@ impl App {
             self.preview = None;
             self.spawn("Restarting the service…", ctx, move || {
                 link.restart()?;
-                Ok("Applied; the service restarted.".into())
+                Ok(if resized && camera_in_use {
+                    "Applied; the service restarted. Apps using the camera keep the old size \
+                     until they close it."
+                } else {
+                    "Applied; the service restarted."
+                }
+                .into())
             });
         } else {
             self.spawn("Applying…", ctx, move || {
@@ -379,10 +477,7 @@ impl App {
         thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Choose a background image")
-                .add_filter(
-                    "Images",
-                    &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"],
-                )
+                .add_filter("Images", &any_case(&IMAGE_EXTENSIONS))
                 .pick_file()
                 .map(|p| p.display().to_string());
             let _ = tx.send(picked);
@@ -451,9 +546,12 @@ impl App {
         {
             self.checks_task = None;
             if self.checks.is_none() && checks.setup_needed.is_some() {
-                self.page = Page::Setup;
+                self.page = Page::Settings;
             }
             self.checks = Some(checks);
+            if std::mem::take(&mut self.recheck) {
+                self.run_checks(ctx);
+            }
         }
         if let Some(rx) = &self.picker
             && let Ok(picked) = rx.try_recv()
@@ -522,4 +620,22 @@ pub fn device_summary(device: &Device) -> (egui::Color32, String) {
         Some(error) => (theme::BAD, format!("{text}: {error}")),
         None => (color, text),
     }
+}
+
+/// "2.3.0" of the build "2.3.0.71988672".
+pub fn release(build: &str) -> &str {
+    build
+        .match_indices('.')
+        .nth(2)
+        .map_or(build, |(at, _)| &build[..at])
+}
+
+pub const IMAGE_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
+
+/// Portal file filters are case-sensitive.
+pub fn any_case(extensions: &[&str]) -> Vec<String> {
+    extensions
+        .iter()
+        .flat_map(|ext| [ext.to_ascii_lowercase(), ext.to_ascii_uppercase()])
+        .collect()
 }

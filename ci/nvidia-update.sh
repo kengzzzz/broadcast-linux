@@ -57,8 +57,31 @@ sevenzip=$(command -v 7zz || command -v 7z) || { echo "::error::7-Zip is needed 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mapfile -t folders < <(grep -ohE '"nvbcast_[a-z_]+_v[0-9_]+"' "$root/src/nvidia.rs" "$root/src/config.rs" | tr -d '"' | sort -u)
-mapfile -t models < <(grep -ohE '"[A-Za-z0-9_]+\.trtpkg"' "$root/src/config.rs" | tr -d '"' | sort -u)
+mapfile -t models < <(grep -ohE '"[A-Za-z0-9_]+\.trtpkg"' "$root/src/config.rs" "$root/src/nvidia.rs" | tr -d '"' | sort -u)
 mapfile -t presets < <(grep -ohE '"vkl_[a-z0-9_]+\.hdr"' "$root/src/config.rs" | tr -d '"' | sort -u)
+# Each effect is its own DLL: NvVFX_CreateEffect("X") loads nvVFXX.dll, NvAR_Create("X")
+# nvARX.dll, and an audio effect nvafx plus its name without underscores.
+mapfile -t dlls < <({
+    grep -ohE '(LoadLibraryA|GetModuleHandleA)\("[^"]+"\)' "$root"/workers/*.c | cut -d'"' -f2 | grep -vx nvcuda.dll
+    grep -ohE '[^_]create\("[A-Za-z]+"' "$root/workers/camera_stream.c" | cut -d'"' -f2 | sed 's/.*/nvVFX&.dll/'
+    grep -ohE 'ar_create\("[A-Za-z]+"' "$root/workers/camera_stream.c" | cut -d'"' -f2 | sed 's/.*/nvAR&.dll/'
+    sed -n '/fn selector/,/^    }/p' "$root/src/config.rs" | grep -oE '=> "[a-z_]+"' | cut -d'"' -f2 \
+        | tr -d _ | sed 's/.*/nvafx&.dll/'
+} | sort -u)
+[[ ${#dlls[@]} -gt 10 ]] || { echo "::error::cannot read the DLLs the workers load"; exit 1; }
+# Packages for older GPUs leave out RTX Video (Feature in src/nvidia.rs). The oldest
+# generation that has each DLL:
+dlls+=(nvngx_vsr.dll)
+declare -A since=([nvVFXVideoSuperRes.dll]=Ampere [nvngx_vsr.dll]=Ampere [nvVFXVideoFrameGeneration.dll]=Ada)
+generations=(Turing Ampere Ada Blackwell)
+rank() {
+    local i
+    for i in "${!generations[@]}"; do
+        [[ ${generations[i]} == "$1" ]] && echo "$i" && return
+    done
+    echo "::error::unknown generation $1" >&2
+    exit 1
+}
 
 entries=""
 problems=""
@@ -76,7 +99,12 @@ while read -r generation _; do
     sha=$(sha256sum "$exe" | cut -d' ' -f1)
     "$sevenzip" l -slt "$exe" < /dev/null | sed -n 's/^Path = //p' > "$work/files"
     rm "$exe"
-    expect '^NvMaxineModels/NvModels/nvbcast/versions/[^/]+/files/[^/]+/NVAudioEffects\.dll$' NVAudioEffects.dll
+    for dll in "${dlls[@]}"; do
+        if [[ -n ${since[$dll]:-} ]] && (( $(rank "$generation") < $(rank "${since[$dll]}") )); then
+            continue
+        fi
+        expect "^NvMaxineModels/NvModels/nvbcast/versions/[^/]+/files/[^/]+/${dll//./\\.}$" "$dll"
+    done
     for folder in "${folders[@]}"; do
         expect "^NvMaxineModels/NvModels/$folder/versions/[^/]+/files/[^/]+/" "$folder"
     done
@@ -121,7 +149,7 @@ done <<< "$installers"
     if [[ -n $problems ]]; then
         printf '%s' "$problems"
     else
-        echo "Every installer has the model folders, audio models and Studio Light presets the code names."
+        echo "Every installer has the effect DLLs, model folders, audio models and Studio Light presets the code names."
     fi
     echo
     echo "Follow [Updating NVIDIA Broadcast]($repo/blob/main/docs/building.md#updating-nvidia-broadcast) and test every effect on a GPU before releasing."

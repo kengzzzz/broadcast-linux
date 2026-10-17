@@ -40,6 +40,14 @@ impl AudioEffect {
             ),
         }
     }
+
+    /// Output lag in samples at 48 kHz, measured on speech.
+    pub fn delay(self, profiled: bool) -> usize {
+        match self {
+            Self::StudioVoiceLowLatency if !profiled => 1920,
+            _ => 3360,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -76,6 +84,48 @@ pub struct Stage {
     pub strength: f32,
 }
 
+/// `Default` loads no profile model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum MicProfile {
+    #[default]
+    Default,
+    Bright,
+    Full,
+    Warm,
+}
+
+impl MicProfile {
+    pub const ALL: [Self; 4] = [Self::Default, Self::Bright, Self::Full, Self::Warm];
+
+    /// The model numbers its six profiles alphabetically: bright, colored, flat, full,
+    /// thin, warm. Broadcast offers three.
+    pub fn id(self) -> Option<u32> {
+        match self {
+            Self::Default => None,
+            Self::Bright => Some(0),
+            Self::Full => Some(3),
+            Self::Warm => Some(5),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StudioVoice {
+    pub enabled: bool,
+    pub profile: MicProfile,
+}
+
+impl Default for StudioVoice {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile: MicProfile::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MicConfig {
@@ -83,7 +133,7 @@ pub struct MicConfig {
     pub input: String,
     pub noise_removal: Adjustable,
     pub room_echo_removal: Adjustable,
-    pub studio_voice: Toggle,
+    pub studio_voice: StudioVoice,
     pub unload_after_minutes: u64,
     pub name: String,
 }
@@ -98,7 +148,10 @@ impl Default for MicConfig {
                 enabled: false,
                 ..Adjustable::default()
             },
-            studio_voice: Toggle { enabled: false },
+            studio_voice: StudioVoice {
+                enabled: false,
+                ..StudioVoice::default()
+            },
             unload_after_minutes: 2,
             name: "NVIDIA Broadcast Mic".into(),
         }
@@ -112,6 +165,13 @@ impl MicConfig {
             self.room_echo_removal,
             self.studio_voice.enabled,
         )
+    }
+
+    pub fn profile(&self) -> Option<u32> {
+        self.studio_voice
+            .enabled
+            .then(|| self.studio_voice.profile.id())
+            .flatten()
     }
 }
 
@@ -169,7 +229,7 @@ fn stages(noise: Adjustable, echo: Adjustable, studio_voice: bool) -> Vec<Stage>
     stages
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum LightPreset {
     Cooler,
@@ -266,6 +326,77 @@ pub enum InputColor {
     Bt709Full,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum SuperResolutionMode {
+    #[default]
+    Quality,
+    Performance,
+}
+
+impl SuperResolutionMode {
+    /// `VideoSuperRes` levels Ultra and Medium. The streaming levels drew halos around hair.
+    pub fn quality_level(self) -> u32 {
+        match self {
+            Self::Quality => 4,
+            Self::Performance => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuperResolution {
+    pub enabled: bool,
+    pub mode: SuperResolutionMode,
+}
+
+impl Default for SuperResolution {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: SuperResolutionMode::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameGenerationMode {
+    Performance,
+    #[default]
+    Balanced,
+    Quality,
+}
+
+impl FrameGenerationMode {
+    pub fn worker_value(self) -> u32 {
+        match self {
+            Self::Performance => 0,
+            Self::Balanced => 1,
+            Self::Quality => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct FrameGeneration {
+    pub enabled: bool,
+    pub mode: FrameGenerationMode,
+    pub multiplier: u32,
+}
+
+impl Default for FrameGeneration {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: FrameGenerationMode::default(),
+            multiplier: 2,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParallelDecode {
@@ -295,6 +426,8 @@ pub struct CameraConfig {
     pub studio_light: StudioLight,
     pub eye_contact: Toggle,
     pub auto_frame: Toggle,
+    pub super_resolution: SuperResolution,
+    pub frame_generation: FrameGeneration,
 }
 
 impl CameraConfig {
@@ -306,9 +439,35 @@ impl CameraConfig {
             || self.studio_light.enabled
             || self.eye_contact.enabled
             || self.auto_frame.enabled
+            || self.super_resolution.enabled
+            || self.frame_generation.enabled
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn frame_multiplier(&self) -> u32 {
+        if self.frame_generation.enabled {
+            self.frame_generation.multiplier.max(1)
+        } else {
+            1
+        }
+    }
+
+    pub fn capture_fps(&self) -> u32 {
+        self.fps / self.frame_multiplier()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_effects()?;
+        let generation = self.frame_generation;
+        anyhow::ensure!(
+            !generation.enabled || self.fps.is_multiple_of(generation.multiplier),
+            "with frame generation, camera.fps must be a multiple of {}",
+            generation.multiplier
+        );
+        Ok(())
+    }
+
+    /// All checks but the frame rate's, which files don't use.
+    pub fn validate_effects(&self) -> Result<()> {
         let backgrounds = usize::from(self.background.is_some())
             + usize::from(self.background_blur.enabled)
             + usize::from(self.background_removal.enabled);
@@ -319,6 +478,10 @@ impl CameraConfig {
         anyhow::ensure!(
             (0.0..=1.0).contains(&self.background_blur.strength),
             "camera.background_blur.strength must be between 0.0 and 1.0"
+        );
+        anyhow::ensure!(
+            (2..=4).contains(&self.frame_generation.multiplier),
+            "camera.frame_generation.multiplier must be 2, 3 or 4"
         );
         Ok(())
     }
@@ -349,6 +512,14 @@ impl Default for CameraConfig {
             },
             eye_contact: Toggle { enabled: false },
             auto_frame: Toggle { enabled: false },
+            super_resolution: SuperResolution {
+                enabled: false,
+                ..SuperResolution::default()
+            },
+            frame_generation: FrameGeneration {
+                enabled: false,
+                ..FrameGeneration::default()
+            },
         }
     }
 }
@@ -358,6 +529,8 @@ impl Default for CameraConfig {
 pub struct ServiceConfig {
     pub idle_timeout_seconds: u64,
     pub gpu_keep_awake: bool,
+    /// `None` picks the first supported GPU.
+    pub gpu: Option<String>,
 }
 
 impl Default for ServiceConfig {
@@ -365,6 +538,7 @@ impl Default for ServiceConfig {
         Self {
             idle_timeout_seconds: 5,
             gpu_keep_awake: true,
+            gpu: None,
         }
     }
 }
@@ -402,6 +576,7 @@ pub fn needs_restart(old: &Config, new: &Config) -> bool {
         || old.speaker.name != new.speaker.name
         || old.camera.device != new.camera.device
         || (old.camera.width, old.camera.height) != (new.camera.width, new.camera.height)
+        || old.service.gpu != new.service.gpu
 }
 
 #[cfg(test)]
@@ -568,6 +743,50 @@ mod tests {
         let mut new = old.clone();
         new.speaker.enabled = true;
         assert!(needs_restart(&old, &new));
+        let mut new = old.clone();
+        new.service.gpu = Some("GPU-1".into());
+        assert!(needs_restart(&old, &new));
+    }
+
+    #[test]
+    fn parses_profiles_and_rtx_video() {
+        let config = Config::parse(
+            "[mic]\nstudio_voice = { profile = \"warm\" }\n[camera]\nfps = 60\n\
+             super_resolution = {}\nframe_generation = { multiplier = 3 }",
+        )
+        .unwrap();
+        assert_eq!(config.mic.profile(), Some(5));
+        let camera = &config.camera;
+        assert!(camera.super_resolution.enabled && camera.has_effects());
+        assert_eq!(camera.super_resolution.mode.quality_level(), 4);
+        assert_eq!(camera.frame_generation.mode, FrameGenerationMode::Balanced);
+        assert_eq!((camera.frame_multiplier(), camera.capture_fps()), (3, 20));
+
+        let profile = |toml: &str| Config::parse(toml).unwrap().mic.profile();
+        assert_eq!(
+            profile("[mic]\nstudio_voice = {}"),
+            None,
+            "default is no profile"
+        );
+        assert_eq!(
+            profile("[mic]\nstudio_voice = { enabled = false, profile = \"full\" }"),
+            None
+        );
+        assert!(Config::parse("[mic]\nstudio_voice = { profile = \"thin\" }").is_err());
+    }
+
+    #[test]
+    fn frame_generation_needs_a_dividing_frame_rate() {
+        let camera = |settings: &str| Config::parse(&format!("[camera]\n{settings}"));
+        assert!(camera("fps = 30\nframe_generation = { multiplier = 4 }").is_err());
+        assert!(camera("fps = 60\nframe_generation = { multiplier = 4 }").is_ok());
+        assert!(camera("fps = 30\nframe_generation = { enabled = false, multiplier = 4 }").is_ok());
+        assert!(camera("frame_generation = { enabled = false, multiplier = 5 }").is_err());
+        let files: CameraConfig =
+            toml::from_str("fps = 30\nframe_generation = { multiplier = 4 }").unwrap();
+        files
+            .validate_effects()
+            .expect("files keep their own frame rate");
     }
 
     #[test]

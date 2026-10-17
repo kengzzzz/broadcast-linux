@@ -86,6 +86,9 @@ To move to a new build:
 1. Paste the issue's `BUILD` and installer entries into `src/setup.rs`.
 2. If the issue lists missing files, update the model folder and file names in
    `src/nvidia.rs` and `src/config.rs`, or the paths `extract` keeps in `src/setup.rs`.
+   A missing effect DLL means NVIDIA dropped that effect, as 2.3.0 did with
+   `nvVFXBackgroundBlur.dll`. The worker then needs its own version, like the blur in
+   `workers/camera_stream.c`.
 3. Run setup, then test every microphone, speaker and camera effect on a GPU. A newer
    CUDA runtime can need a driver export table the nvcuda relay lacks, like the one
    `patches/nvcuda-export-table-d2688bf2.patch` adds. It only fails when an effect starts.
